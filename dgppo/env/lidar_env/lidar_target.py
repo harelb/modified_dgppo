@@ -1,4 +1,6 @@
+import jax
 import jax.numpy as jnp
+import jax.random as jr
 import jax.debug as jdebug
 
 from typing import Optional, Dict, Tuple
@@ -6,8 +8,14 @@ import functools as ft
 
 from dgppo.utils.graph import EdgeBlock
 from dgppo.utils.typing import Action, Array, Pos2d, Reward, State
-from dgppo.env.lidar_env.base import LidarEnv, LidarEnvState, LidarEnvGraphsTuple, TARGET_TERRAIN_ID
-from dgppo.utils.utils import jax_vmap
+from dgppo.env.lidar_env.base import (
+    LidarEnv, LidarEnvState, LidarEnvGraphsTuple, TARGET_TERRAIN_ID,
+    get_terrain_id, _terrain_from_perp,
+)
+from dgppo.env.utils import get_ray_alphas
+from dgppo.utils.utils import jax_vmap, merge01
+
+DELAY_STEPS = 15  # round(0.5 s / (1/30 s)) — 500ms action delay
 
 ALL_POSSIBLE_REGION_NAMES = [
         "open_space",
@@ -107,7 +115,7 @@ def _terrain_reward_per_agent(
 
 def _calculate_preference_vector_reward(
     boundary_hit_positions: jnp.ndarray,  # (n_rays, 2) — boundary hit positions
-    boundary_terrain_ids: jnp.ndarray,    # (n_rays,)   — other-side terrain IDs
+    boundary_terrain_ids: jnp.ndarray,    # (n_rays,)   — terrain on OTHER SIDE
     agent_pos: jnp.ndarray,               # (2,)
     agent_vel: jnp.ndarray,               # (2,)
     current_terrain_id: jnp.ndarray,      # scalar
@@ -115,12 +123,18 @@ def _calculate_preference_vector_reward(
     sense_range: float,
 ) -> float:
     """
-    Preference vector reward for one agent (3c8a670 version).
+    Road-embedding preference vector reward for one agent.
 
-    - Not in sidewalk + entry visible:  cos(vel, direction to nearest sidewalk boundary)
-    - Not in sidewalk + no entry:       cos(vel, global bearing)   ← fallback
-    - In sidewalk + both edges visible: cos(vel, direction to lateral centerline)
-    - In sidewalk + edges not visible:  cos(vel, global bearing)   ← fallback
+    Outside target terrain:
+        cos(vel, direction to nearest target boundary), or global bearing fallback.
+
+    Inside target terrain (anti-parallel boundary pairing):
+        Edge A = nearest non-target boundary.
+        Edge B = non-target boundary most anti-parallel to A (opposite side of strip).
+        road_dir = perp(B − A), sign chosen so it agrees with global bearing.
+        Blends cosine_road with a centering pull (cosine toward A–B midpoint) scaled
+        by the agent's normalised lateral offset from the strip centre.
+        Falls back to global bearing when A/B are not both visible.
     """
     dists = jnp.linalg.norm(boundary_hit_positions - agent_pos[None, :], axis=-1)  # (n_rays,)
     in_target = (current_terrain_id == TARGET_TERRAIN_ID)
@@ -132,39 +146,64 @@ def _calculate_preference_vector_reward(
     bearing_vec = jnp.array([jnp.cos(target_bearing), jnp.sin(target_bearing)])
     cosine_bearing = jnp.dot(agent_vel, bearing_vec) / safe_vel_norm
 
-    # ── Not in sidewalk: point toward nearest entry ───────────────────────
+    # ── Not in target: point toward nearest entry ─────────────────────────
     is_entry = (boundary_terrain_ids == TARGET_TERRAIN_ID)
     entry_masked = jnp.where(is_entry, dists, sense_range * 2.0)
     nearest_entry_idx = jnp.argmin(entry_masked)
-    any_entry_visible = (entry_masked[nearest_entry_idx] < sense_range)
+    any_entry_visible = entry_masked[nearest_entry_idx] < sense_range
 
     entry_dir = boundary_hit_positions[nearest_entry_idx] - agent_pos
     entry_dir_norm = entry_dir / (jnp.linalg.norm(entry_dir) + 1e-6)
     cosine_entry = jnp.where(
         any_entry_visible,
         jnp.dot(agent_vel, entry_dir_norm) / safe_vel_norm,
-        cosine_bearing,  # no sidewalk visible: follow global bearing
+        cosine_bearing,
     )
 
-    # ── In sidewalk: point toward lateral centerline ──────────────────────
-    is_road_side  = (boundary_terrain_ids == 0)
-    is_grass_side = (boundary_terrain_ids == 1)
+    # ── In target: anti-parallel boundary pairing ─────────────────────────
+    is_non_target = (boundary_terrain_ids != TARGET_TERRAIN_ID)
+    non_target_dists = jnp.where(is_non_target, dists, sense_range * 2.0)
 
-    road_masked  = jnp.where(is_road_side,  dists, sense_range * 2.0)
-    grass_masked = jnp.where(is_grass_side, dists, sense_range * 2.0)
+    # Edge A: nearest non-target boundary
+    idx_a = jnp.argmin(non_target_dists)
+    hit_a = boundary_hit_positions[idx_a]
+    dist_a = non_target_dists[idx_a]
 
-    nearest_road_hit  = boundary_hit_positions[jnp.argmin(road_masked)]
-    nearest_grass_hit = boundary_hit_positions[jnp.argmin(grass_masked)]
-    any_center_visible = (road_masked.min() < sense_range) & (grass_masked.min() < sense_range)
+    dir_a = hit_a - agent_pos
+    dir_a_norm = dir_a / (jnp.linalg.norm(dir_a) + 1e-6)
 
-    center_pos = (nearest_road_hit + nearest_grass_hit) / 2.0
-    center_dir = center_pos - agent_pos
-    center_dir_norm = center_dir / (jnp.linalg.norm(center_dir) + 1e-6)
-    cosine_center = jnp.where(
-        any_center_visible,
-        jnp.dot(agent_vel, center_dir_norm) / safe_vel_norm,
-        cosine_bearing,  # edges not visible: follow global bearing
-    )
+    # Edge B: non-target boundary most anti-parallel to A
+    dirs = boundary_hit_positions - agent_pos[None, :]                         # (n_rays, 2)
+    dirs_norm = dirs / (jnp.linalg.norm(dirs, axis=-1, keepdims=True) + 1e-6)
+    dot_with_a = dirs_norm @ dir_a_norm                                        # (n_rays,)
+    anti_score = jnp.where(is_non_target, dot_with_a, 1.0)
+    anti_score = anti_score.at[idx_a].set(1.0)  # exclude A itself
+
+    idx_b = jnp.argmin(anti_score)
+    hit_b = boundary_hit_positions[idx_b]
+    dist_b = dists[idx_b]
+
+    # Gate: both visible and B sufficiently anti-parallel
+    any_both_visible = (dist_a < sense_range) & (dist_b < sense_range) & (anti_score[idx_b] < -0.1)
+
+    # Road direction = perp(B − A), signed to agree with global bearing
+    cross = hit_b - hit_a
+    road_opt = jnp.array([-cross[1], cross[0]])
+    road_dir = jnp.where(jnp.dot(road_opt, bearing_vec) >= 0, road_opt, -road_opt)
+    road_dir_norm = road_dir / (jnp.linalg.norm(road_dir) + 1e-6)
+    cosine_road = jnp.dot(agent_vel, road_dir_norm) / safe_vel_norm
+
+    # Centering blend: pull toward A–B midpoint proportional to lateral offset
+    midpoint = (hit_a + hit_b) / 2.0
+    lateral_vec = midpoint - agent_pos
+    lateral_norm = lateral_vec / (jnp.linalg.norm(lateral_vec) + 1e-6)
+    cosine_lateral = jnp.dot(agent_vel, lateral_norm) / safe_vel_norm
+
+    strip_half_width = jnp.linalg.norm(cross) / 2.0 + 1e-6
+    offset = jnp.clip(jnp.linalg.norm(lateral_vec) / strip_half_width, 0.0, 1.0)
+
+    cosine_road_blended = (1.0 - 0.5 * offset) * cosine_road + 0.5 * offset * cosine_lateral
+    cosine_center = jnp.where(any_both_visible, cosine_road_blended, cosine_bearing)
 
     return jnp.where(in_target, cosine_center, cosine_entry)
 
@@ -426,10 +465,11 @@ class LidarTarget(LidarEnv):
 
     def edge_blocks(self, state: LidarEnvState, lidar_data: Optional[Pos2d] = None) -> list[EdgeBlock]:
         # agent - agent connection
-        agent_pos = state.agent[:, :2]
+        agent_obs = state.obs_agent if state.obs_agent.shape[0] > 0 else state.agent
+        agent_pos = agent_obs[:, :2]
         pos_diff = agent_pos[:, None, :] - agent_pos[None, :, :]  # [i, j]: i -> j
-        edge_feats = (jax_vmap(self.state2feat)(state.agent)[:, None, :] -
-                      jax_vmap(self.state2feat)(state.agent)[None, :, :])
+        edge_feats = (jax_vmap(self.state2feat)(agent_obs)[:, None, :] -
+                      jax_vmap(self.state2feat)(agent_obs)[None, :, :])
         dist = jnp.linalg.norm(pos_diff, axis=-1)
         dist += jnp.eye(dist.shape[1]) * (self._params["comm_radius"] + 1)
         agent_agent_mask = jnp.less(dist, self._params["comm_radius"])
@@ -460,3 +500,229 @@ class LidarTarget(LidarEnv):
                 )
 
         return [agent_agent_edges] + agent_goal_edges + agent_obs_edges
+
+
+# ---------------------------------------------------------------------------
+# Real terrain-boundary lidar (used only by V3/V4)
+# ---------------------------------------------------------------------------
+
+def _get_semantic_lidar_single_real(
+    agent_pos: jnp.ndarray,              # (2,)
+    obstacles,
+    bridge_center: jnp.ndarray,          # (2,) — bend/junction point
+    bridge_gap_width: jnp.ndarray,
+    bridge_wall_thickness: jnp.ndarray,
+    bridge_theta: jnp.ndarray,           # segment-1 angle (radians)
+    terrain_config: jnp.ndarray,
+    num_beams: int,
+    sense_range: float,
+    bridge_length: jnp.ndarray = 1.0,
+    bridge_bend_angle: jnp.ndarray = 0.0,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Per-ray semantic lidar with real terrain-boundary detection.
+    Handles straight and bent bridges (two-segment).
+
+    For each of B rays returns TWO hit points (2B total):
+      [0:B]  — obstacle hits  (or sensor-range endpoint)
+      [B:2B] — nearest TARGET_TERRAIN_ID boundary along the ray
+
+    terrain_ids[B:2B] = terrain on the far side of each detected boundary.
+    """
+    thetas = jnp.linspace(-jnp.pi, jnp.pi - 2 * jnp.pi / num_beams, num_beams)
+    dirs   = jnp.stack([jnp.cos(thetas), jnp.sin(thetas)], axis=-1)   # (B, 2)
+    starts = jnp.tile(agent_pos[None, :], (num_beams, 1))
+    ends   = starts + dirs * sense_range
+
+    alphas_obs = get_ray_alphas(starts, ends, obstacles)               # (B,)
+
+    # Target-terrain borders in perpendicular-coordinate space
+    half_gap        = bridge_gap_width / 2.0
+    full_half       = half_gap + bridge_wall_thickness
+    sidewalk_border = bridge_gap_width * 0.2
+    road_half       = half_gap - sidewalk_border
+    target_borders_c1 = jnp.array([ full_half, -full_half,  full_half, -full_half])
+    target_borders_c2 = jnp.array([ road_half, -road_half,  half_gap,  -half_gap])
+    target_borders = jnp.where(terrain_config == 1, target_borders_c1, target_borders_c2)  # (4,)
+
+    eps = 1e-8
+    dx0 = agent_pos[0] - bridge_center[0]
+    dy0 = agent_pos[1] - bridge_center[1]
+
+    def _alphas_for_segment(theta_seg):
+        cos_s = jnp.cos(theta_seg);  sin_s = jnp.sin(theta_seg)
+        perp_start = -sin_s * dx0 + cos_s * dy0
+        perp_dirs  = -sin_s * dirs[:, 0] + cos_s * dirs[:, 1]         # (B,)
+        safe_pd    = jnp.where(jnp.abs(perp_dirs) > eps, perp_dirs, eps)
+        alphas_b   = (target_borders[None, :] - perp_start) / (safe_pd[:, None] * sense_range)  # (B, 4)
+        valid      = (alphas_b > 1e-4) & (alphas_b < 1.0) & (jnp.abs(perp_dirs[:, None]) > eps)
+        return jnp.where(valid, alphas_b, 2.0)                         # (B, 4)
+
+    alphas_b_s1 = _alphas_for_segment(bridge_theta)                    # (B, 4)
+    alphas_b_s2 = _alphas_for_segment(bridge_theta + bridge_bend_angle)# (B, 4)
+
+    # Both segments contribute; nearest valid boundary wins
+    alphas_b_all   = jnp.concatenate([alphas_b_s1, alphas_b_s2], axis=-1)  # (B, 8)
+    alphas_terrain = alphas_b_all.min(axis=-1)                              # (B,)
+
+    obs_hits      = agent_pos[None, :] + alphas_obs[:, None]     * sense_range * dirs  # (B, 2)
+    boundary_hits = agent_pos[None, :] + alphas_terrain[:, None] * sense_range * dirs  # (B, 2)
+    hit_points    = jnp.concatenate([obs_hits, boundary_hits])                          # (2B, 2)
+
+    _get_tid = ft.partial(
+        get_terrain_id,
+        bridge_center=bridge_center,
+        bridge_gap_width=bridge_gap_width,
+        bridge_wall_thickness=bridge_wall_thickness,
+        bridge_theta=bridge_theta,
+        terrain_config=terrain_config,
+        bridge_length=bridge_length,
+        bridge_bend_angle=bridge_bend_angle,
+    )
+
+    obs_terrain_ids = jax_vmap(_get_tid)(obs_hits)                     # (B,)
+
+    BOUNDARY_STEP = 0.005  # step past the boundary to sample the far-side terrain
+    boundary_beyond = boundary_hits + BOUNDARY_STEP * dirs             # (B, 2)
+    boundary_terrain_ids = jax_vmap(_get_tid)(boundary_beyond)         # (B,)
+
+    terrain_ids = jnp.concatenate([obs_terrain_ids, boundary_terrain_ids])  # (2B,)
+    return hit_points, terrain_ids
+
+
+# ---------------------------------------------------------------------------
+# Robust training variants V1–V4
+# ---------------------------------------------------------------------------
+# V1/V2: speed + noise; boundary terrain IDs zeroed to Grass (1) so the policy
+#         sees no terrain-lane information — pure navigation without terrain awareness.
+# V3/V4: speed + noise; boundary terrain IDs populated from the sim geometry —
+#         terrain-aware rewards (PREF_VECTOR, TERRAIN_REWARD) enabled.
+# V2/V4 add 500ms (15-step) action delay on top of their respective base.
+
+class LidarTargetV1(LidarTarget):
+    """V1: real-world speed (1.5 m/s) + lidar noise + state noise. No terrain boundary info."""
+
+    MAX_SPEED_MS: float = 1.5
+    SCALE_2D_3D: float = 11.0
+    SIM_MAX_VEL: float = 1.5 / 11.0   # ≈ 0.1364 sim units/s
+
+    # Terrain-boundary rewards disabled — boundary terrain IDs are all Grass
+    PREF_VECTOR_REWARD_COEFF = 0.0
+    TERRAIN_REWARD_COEFF = 0.0
+
+    PARAMS = {
+        **LidarTarget.PARAMS,
+        "lidar_noise_std": 0.05 / 11.0,   # 5 cm real → ~0.0045 sim units
+        "pos_noise_std":   0.03 / 11.0,   # 3 cm position → ~0.0027 sim units
+        "vel_noise_std":   0.074 / 11.0,  # 0.074 m/s velocity (measured) → ~0.0067 sim units
+    }
+
+    def state_lim(self, state=None):
+        v = self.SIM_MAX_VEL
+        return jnp.array([0., 0., -v, -v]), jnp.array([self.area_size, self.area_size, v, v])
+
+    def agent_step_euler(self, agent_states, action):
+        vel = action * self.SIM_MAX_VEL
+        next_pos = agent_states[:, :2] + vel * self.dt
+        return self.clip_state(jnp.concatenate([next_pos, vel], axis=1))
+
+    def get_semantic_lidar_data(self, states, obstacles, bridge_center, bridge_gap_width,
+                                bridge_wall_thickness, bridge_theta, terrain_config,
+                                bridge_length=1.0, bridge_bend_angle=0.0):
+        """Compute lidar but null out boundary terrain IDs (set all to Grass=1)."""
+        from dgppo.env.lidar_env.base import LidarEnv
+        lidar_data, terrain_ids = LidarEnv.get_semantic_lidar_data(
+            self, states, obstacles, bridge_center, bridge_gap_width,
+            bridge_wall_thickness, bridge_theta, terrain_config,
+            bridge_length=bridge_length, bridge_bend_angle=bridge_bend_angle,
+        )
+        n_rays = self._params["n_rays"]
+        # First n_rays = obstacle hits (keep as-is); last n_rays = boundary hits (null to Grass)
+        terrain_ids_no_bnd = terrain_ids.at[:, n_rays:].set(1)
+        return lidar_data, terrain_ids_no_bnd
+
+    def _obs_noise(self, agent_states, lidar_data, key):
+        k1, k2, k3 = jr.split(key, 3)
+        pos_noise = jr.normal(k1, (self.num_agents, 2)) * self.params["pos_noise_std"]
+        vel_noise = jr.normal(k2, (self.num_agents, 2)) * self.params["vel_noise_std"]
+        obs_agent = agent_states + jnp.concatenate([pos_noise, vel_noise], axis=1)
+        noisy_lidar = (
+            lidar_data + jr.normal(k3, lidar_data.shape) * self.params["lidar_noise_std"]
+            if lidar_data is not None
+            else lidar_data
+        )
+        return obs_agent, noisy_lidar
+
+
+class LidarTargetV2(LidarTargetV1):
+    """V2: V1 features + 500ms (15-step) action delay."""
+
+    def reset(self, key, **kwargs):
+        graph = super().reset(key, **kwargs)
+        env_state = graph.env_states
+        new_env_state = env_state._replace(
+            action_buffer=jnp.zeros(
+                (DELAY_STEPS, self.num_agents, self.action_dim), dtype=jnp.float32
+            )
+        )
+        return self.get_graph(new_env_state, None)
+
+    def _get_executed_action(self, action, env_state):
+        buf = env_state.action_buffer                                    # (DELAY_STEPS, n_agents, 2)
+        delayed_action = buf[0]                                          # (n_agents, 2) — oldest
+        new_buf = jnp.concatenate([buf[1:], action[None]], axis=0)      # FIFO shift
+        return delayed_action, env_state._replace(action_buffer=new_buf)
+
+
+class LidarTargetV3(LidarTargetV1):
+    """V3: V1 features + real terrain boundary hits + preference vector reward."""
+
+    PREF_VECTOR_REWARD_COEFF = 0.2
+
+    def get_semantic_lidar_data(self, states, obstacles, bridge_center, bridge_gap_width,
+                                bridge_wall_thickness, bridge_theta, terrain_config,
+                                bridge_length=1.0, bridge_bend_angle=0.0):
+        """Use real terrain-boundary lidar (skips V1's all-grass override)."""
+        lidar_data, terrain_ids = jax_vmap(
+            ft.partial(
+                _get_semantic_lidar_single_real,
+                obstacles=obstacles,
+                bridge_center=bridge_center,
+                bridge_gap_width=bridge_gap_width,
+                bridge_wall_thickness=bridge_wall_thickness,
+                bridge_theta=bridge_theta,
+                terrain_config=terrain_config,
+                num_beams=self._params["n_rays"],
+                sense_range=self._params["comm_radius"],
+                bridge_length=bridge_length,
+                bridge_bend_angle=bridge_bend_angle,
+            )
+        )(states[:, :2])
+        return lidar_data, terrain_ids
+
+
+class LidarTargetV4(LidarTargetV2):
+    """V4: V2 features (speed + noise + delay) + real terrain boundary hits + preference vector reward."""
+
+    PREF_VECTOR_REWARD_COEFF = 0.2
+
+    def get_semantic_lidar_data(self, states, obstacles, bridge_center, bridge_gap_width,
+                                bridge_wall_thickness, bridge_theta, terrain_config,
+                                bridge_length=1.0, bridge_bend_angle=0.0):
+        """Use real terrain-boundary lidar (skips V1's all-grass override)."""
+        lidar_data, terrain_ids = jax_vmap(
+            ft.partial(
+                _get_semantic_lidar_single_real,
+                obstacles=obstacles,
+                bridge_center=bridge_center,
+                bridge_gap_width=bridge_gap_width,
+                bridge_wall_thickness=bridge_wall_thickness,
+                bridge_theta=bridge_theta,
+                terrain_config=terrain_config,
+                num_beams=self._params["n_rays"],
+                sense_range=self._params["comm_radius"],
+                bridge_length=bridge_length,
+                bridge_bend_angle=bridge_bend_angle,
+            )
+        )(states[:, :2])
+        return lidar_data, terrain_ids

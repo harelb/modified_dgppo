@@ -2,7 +2,7 @@ from typing import Optional
 
 from .base import MultiAgentEnv
 from dgppo.env.mpe import MPETarget, MPESpread, MPELine, MPEFormation, MPECorridor, MPEConnectSpread
-from dgppo.env.lidar_env import LidarSpread, LidarTarget, LidarLine #, LidarBicycleTarget
+from dgppo.env.lidar_env import LidarSpread, LidarTarget, LidarLine, LidarTargetV1, LidarTargetV2, LidarTargetV3, LidarTargetV4 #, LidarBicycleTarget
 from dgppo.env.vmas import VMASWheel, VMASReverseTransport
 
 
@@ -20,6 +20,10 @@ ENV = {
     #'LidarBicycleTarget': LidarBicycleTarget,
     'VMASReverseTransport': VMASReverseTransport,
     'VMASWheel': VMASWheel,
+    'LidarTargetV1': LidarTargetV1,
+    'LidarTargetV2': LidarTargetV2,
+    'LidarTargetV3': LidarTargetV3,
+    'LidarTargetV4': LidarTargetV4,
 }
 
 

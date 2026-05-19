@@ -47,6 +47,11 @@ class LidarEnvState(NamedTuple):
     bridge_bend_angle: float    # Angular offset of segment 2 relative to segment 1 (0 = straight)
     terrain_config: jnp.ndarray  # scalar int: 1 or 2, sampled randomly per episode
 
+    # Noise/delay variant fields (defaults = no-op for base LidarTarget)
+    key: jnp.ndarray = jnp.zeros(2, dtype=jnp.uint32)       # PRNGKey carried through steps
+    obs_agent: jnp.ndarray = jnp.zeros((0, 4))               # noisy agent obs; (0,4)=use true state
+    action_buffer: jnp.ndarray = jnp.zeros((0, 2))           # delay buffer; (0,2)=no delay
+
     @property
     def n_agent(self) -> int:
         return self.agent.shape[0]
@@ -779,6 +784,7 @@ class LidarEnv(MultiAgentEnv, ABC):
             lidar_hit_terrain_ids_flat = jnp.ones(n_full, dtype=jnp.int32)
             lidar_hit_positions_flat   = jnp.zeros((n_full, 2), dtype=jnp.float32)
 
+        step_key, key = jr.split(key)
         env_states = LidarEnvState(
             agent=states,
             goal=goals,
@@ -798,6 +804,7 @@ class LidarEnv(MultiAgentEnv, ABC):
             bridge_theta=bridge_theta_env_state,
             bridge_bend_angle=bridge_bend_angle_env_state,
             terrain_config=terrain_config_env_state,
+            key=step_key,
         )
 
         return self.get_graph(env_states, lidar_data)
@@ -933,7 +940,8 @@ class LidarEnv(MultiAgentEnv, ABC):
 
         # calculate next states
         action = self.clip_action(action)
-        next_agent_base_states = self.agent_step_euler(agent_base_states, action) # Only update (x,y,vx,vy)
+        executed_action, env_state_updated = self._get_executed_action(action, graph.env_states)
+        next_agent_base_states = self.agent_step_euler(agent_base_states, executed_action)
 
         # --- Terrain one-hot: geometry-based detection on next positions ---
         next_terrain_ids = jax_vmap(
@@ -998,6 +1006,9 @@ class LidarEnv(MultiAgentEnv, ABC):
         lidar_hit_terrain_ids_next = merge01(lidar_terrain_ids_next)  # (n_agents * 2*n_rays,)
         lidar_hit_positions_next   = merge01(lidar_data_next)         # (n_agents * 2*n_rays, 2)
 
+        step_key, k_noise = jr.split(env_state_updated.key)
+        obs_agent, noisy_lidar = self._obs_noise(next_agent_base_states, lidar_data_next, k_noise)
+
         next_env_state = LidarEnvState(
             next_agent_base_states,
             goals,
@@ -1017,12 +1028,15 @@ class LidarEnv(MultiAgentEnv, ABC):
             bridge_theta,
             bridge_bend_angle,
             terrain_config,
+            key=step_key,
+            obs_agent=obs_agent,
+            action_buffer=env_state_updated.action_buffer,
         )
 
         info = {}
         done = jnp.array(False)
 
-        return self.get_graph(next_env_state, lidar_data_next), reward, cost, done, info
+        return self.get_graph(next_env_state, noisy_lidar), reward, cost, done, info
 
     @abstractmethod
     def get_reward(self, graph: LidarEnvGraphsTuple, action: Action) -> Reward:
@@ -1134,8 +1148,9 @@ class LidarEnv(MultiAgentEnv, ABC):
         IND = self.state_dim + self.bearing_dim + 3 * self.n_cluster + self.terrain_oh_dim
         node_feats = jnp.zeros((n_nodes, self.node_dim), dtype=jnp.float32)
 
-        # Agent nodes
-        node_feats = node_feats.at[:self.num_agents, :self.state_dim].set(state.agent)
+        # Agent nodes — use noisy obs when available (obs_agent shape (0,4) means use true state)
+        agent_for_obs = state.obs_agent if state.obs_agent.shape[0] > 0 else state.agent
+        node_feats = node_feats.at[:self.num_agents, :self.state_dim].set(agent_for_obs)
         node_feats = node_feats.at[:self.num_agents, self.state_dim].set(state.bearing)
         node_feats = node_feats.at[:self.num_agents, self.state_dim+self.bearing_dim:self.state_dim+self.bearing_dim+self.n_cluster].set(state.current_cluster_oh)
         node_feats = node_feats.at[:self.num_agents, self.state_dim+self.bearing_dim+self.n_cluster:self.state_dim+self.bearing_dim+2*self.n_cluster].set(state.start_cluster_oh)
@@ -1196,3 +1211,18 @@ class LidarEnv(MultiAgentEnv, ABC):
         lower_lim = jnp.ones(2) * -1.0
         upper_lim = jnp.ones(2)
         return lower_lim, upper_lim
+
+    def _get_executed_action(
+        self, action: Action, env_state: "LidarEnvState"
+    ) -> Tuple[Action, "LidarEnvState"]:
+        """Returns (executed_action, updated_env_state). Base: action executes immediately."""
+        return action, env_state
+
+    def _obs_noise(
+        self,
+        agent_states: jnp.ndarray,
+        lidar_data: Optional[jnp.ndarray],
+        key: PRNGKey,
+    ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
+        """Returns (obs_agent, noisy_lidar_data). Base: no noise; obs_agent shape (0,4)."""
+        return jnp.zeros((0, 4), dtype=jnp.float32), lidar_data
