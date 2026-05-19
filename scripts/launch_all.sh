@@ -10,8 +10,9 @@
 #   tmux attach -t dgppo          # to monitor progress
 
 # ── Configuration ────────────────────────────────────────────────────────────
-GPU_PRIORITY=(h100 a100 l40s a40)   # order of preference; best first
-WAIT_MIN=20                          # minutes to wait before trying next GPU
+GPU_PRIORITY=(h200 h100 a100 l40s a40)  # order of preference; best first
+WAIT_MIN_H200=120                        # longer wait for H200 (high demand)
+WAIT_MIN=20                              # minutes to wait for all other GPUs
 LOG_DIR="${HOME}/orcd/scratch/dgppo/logs"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VARIANTS=(v1 v2 v3 v4)
@@ -34,8 +35,9 @@ submit_with_fallback() {
             continue
         fi
 
-        echo "  Job ${JOB_ID} queued on ${GPU}. Waiting ${WAIT_MIN} min..." | tee -a "$LOG"
-        sleep $(( WAIT_MIN * 60 ))
+        WAIT=$([ "$GPU" = "h200" ] && echo $WAIT_MIN_H200 || echo $WAIT_MIN)
+        echo "  Job ${JOB_ID} queued on ${GPU}. Waiting ${WAIT} min..." | tee -a "$LOG"
+        sleep $(( WAIT * 60 ))
 
         STATUS=$(squeue -j "$JOB_ID" -h -o "%T" 2>/dev/null)
 
