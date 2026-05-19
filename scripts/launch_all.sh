@@ -10,7 +10,7 @@
 #   tmux attach -t dgppo          # to monitor progress
 
 # ── Configuration ────────────────────────────────────────────────────────────
-GPU_PRIORITY=(h200 h100 a100 l40s a40)  # order of preference; best first
+GPU_PRIORITY=(h100 a100 l40s a40)       # order of preference; best first
 WAIT_MIN=10                              # minutes to wait before trying next GPU
 LOG_DIR="${HOME}/orcd/scratch/dgppo/logs"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
