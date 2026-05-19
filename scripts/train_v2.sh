@@ -2,18 +2,18 @@
 #SBATCH -p mit_preemptable
 #SBATCH --array=0-2
 #SBATCH -c 8
-#SBATCH --gres=gpu:1
+#SBATCH --gpus=1
 #SBATCH -t 2880
 #SBATCH --mem=64GB
 #SBATCH -o /home/harelb/orcd/scratch/dgppo/logs/v2_%A_%a.out
 #
 # GPU-adaptive: batch size scales with detected VRAM.
-# To target a specific GPU type, replace --gres=gpu:1 with e.g.:
-#   --gres=gpu:h200:1   (H200, 141 GB)
-#   --gres=gpu:h100:1   (H100,  80 GB)
-#   --gres=gpu:a100:1   (A100,  40/80 GB)
-#   --gres=gpu:l40s:1   (L40S,  44 GB)
-#   --gres=gpu:rtx6000:1 (RTX6000, 24 GB)
+# To target a specific GPU type, replace --gpus=1 with e.g.:
+#   --gpus=h200:1        (H200, 141 GB)
+#   --gpus=h100:1        (H100,  80 GB)
+#   --gpus=a100:1     (A100,  40/80 GB)
+#   --gpus=l40s:1        (L40S,  44 GB, most available)
+#   --gpus=a40:1      (A40,   44 GB, preemptable only)
 
 module load miniforge
 source activate dgppo
