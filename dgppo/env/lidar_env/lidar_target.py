@@ -617,6 +617,15 @@ class LidarTargetV1(LidarTarget):
         "vel_noise_std":   0.074 / 11.0,  # 0.074 m/s velocity (measured) → ~0.0067 sim units
     }
 
+    def reset(self, key, **kwargs):
+        graph = super().reset(key, **kwargs)
+        env_state = graph.env_states
+        # Initialize obs_agent with (n_agents, 4) so lax.scan carry shape is consistent with step()
+        new_env_state = env_state._replace(
+            obs_agent=jnp.zeros((self.num_agents, 4), dtype=jnp.float32)
+        )
+        return graph._replace(env_states=new_env_state)
+
     def state_lim(self, state=None):
         v = self.SIM_MAX_VEL
         return jnp.array([0., 0., -v, -v]), jnp.array([self.area_size, self.area_size, v, v])
