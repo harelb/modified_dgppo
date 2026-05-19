@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -p mit_preemptable
-#SBATCH --array=0-2
+#SBATCH --array=0
 #SBATCH -c 8
 #SBATCH --gpus=1
 #SBATCH -t 2880
