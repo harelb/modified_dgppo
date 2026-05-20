@@ -833,12 +833,24 @@ class _FixedLagMixin:
         )
         es = es._replace(key=k_rest)
 
+        reward_buf = jnp.zeros(self.ACT_DELAY_STEPS, dtype=jnp.float32)
+
         es = es._replace(
             obs_agent_buffer=obs_buf,
             lidar_buffer=lid_buf,
             action_buffer=act_buf,
+            reward_buffer=reward_buf,
         )
         return self.get_graph(es, init_lidar)
+
+    def step(self, graph, action, **kwargs):
+        next_graph, reward, cost, done, info = super().step(graph, action, **kwargs)
+        es = next_graph.env_states
+        buf = es.reward_buffer
+        delayed_reward = buf[0]
+        new_buf = jnp.concatenate([buf[1:], reward[None]])
+        new_es = es._replace(reward_buffer=new_buf)
+        return next_graph._replace(env_states=new_es), delayed_reward, cost, done, info
 
     def _apply_obs_delay(self, obs_agent, noisy_lidar, env_state):
         buf_obs = env_state.obs_agent_buffer

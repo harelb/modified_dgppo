@@ -56,6 +56,9 @@ class LidarEnvState(NamedTuple):
     obs_agent_buffer: jnp.ndarray = jnp.zeros((0, 0, 4))    # (buf_size, n_agents, 4)
     lidar_buffer: jnp.ndarray = jnp.zeros((0, 0, 0, 2))     # (buf_size, n_agents, 2*n_rays, 2)
 
+    # Reward delay buffer (lag variants) — shifts reward to match causing action
+    reward_buffer: jnp.ndarray = jnp.zeros(0)                       # (act_delay,); empty=no shift
+
     # Terrain randomization flag (DRT) — sampled once per episode at reset
     use_real_terrain: jnp.ndarray = jnp.ones((), dtype=jnp.int32)  # 1=real, 0=hardcoded
 
@@ -1046,6 +1049,7 @@ class LidarEnv(MultiAgentEnv, ABC):
             action_buffer=env_state_updated.action_buffer,
             obs_agent_buffer=env_state_updated.obs_agent_buffer,
             lidar_buffer=env_state_updated.lidar_buffer,
+            reward_buffer=env_state_updated.reward_buffer,
             use_real_terrain=env_state_updated.use_real_terrain,
         )
 
@@ -1086,7 +1090,7 @@ class LidarEnv(MultiAgentEnv, ABC):
         # add margin
         eps = 0.5
         cost = jnp.where(cost <= 0.0, cost - eps, cost + eps)
-        cost = jnp.clip(cost, a_min=-1.0, a_max=1.0)
+        cost = jnp.clip(cost, -1.0, 1.0)
 
         return cost
 
