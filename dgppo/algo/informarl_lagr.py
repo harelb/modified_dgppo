@@ -254,7 +254,7 @@ class InforMARLLagr(InforMARL):
             return (Vl_model, Vh_model, policy_model, lagr_lambda), (Vl_info | Vh_info | policy_info | lagr_info)
 
         (Vl_train_state, Vh_train_state, policy_train_state, ah_lagr), update_info = jax.lax.scan(
-            update_fn, (Vl_train_state, Vh_train_state, policy_train_state, ah_lagr), batch_idx, unroll=2)
+            update_fn, (Vl_train_state, Vh_train_state, policy_train_state, ah_lagr), batch_idx)
 
         # get training info of the last PPO epoch
         info = jtu.tree_map(lambda x: x[-1], update_info)

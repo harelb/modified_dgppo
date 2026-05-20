@@ -346,7 +346,7 @@ class InforMARL(Algorithm):
             return (Vl_model, policy_model), (Vl_info | policy_info)
 
         (Vl_train_state, policy_train_state), info = lax.scan(
-            update_fn, (Vl_train_state, policy_train_state), batch_idx, unroll=2
+            update_fn, (Vl_train_state, policy_train_state), batch_idx
         )
 
         # get training info of the last PPO epoch
