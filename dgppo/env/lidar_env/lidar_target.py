@@ -637,7 +637,7 @@ class LidarTargetV1(LidarTarget):
 
     def get_semantic_lidar_data(self, states, obstacles, bridge_center, bridge_gap_width,
                                 bridge_wall_thickness, bridge_theta, terrain_config,
-                                bridge_length=1.0, bridge_bend_angle=0.0):
+                                bridge_length=1.0, bridge_bend_angle=0.0, **kwargs):
         """Compute lidar but null out boundary terrain IDs (set all to Grass=1)."""
         from dgppo.env.lidar_env.base import LidarEnv
         lidar_data, terrain_ids = LidarEnv.get_semantic_lidar_data(
@@ -684,13 +684,13 @@ class LidarTargetV2(LidarTargetV1):
 
 
 class LidarTargetV3(LidarTargetV1):
-    """V3: V1 features + real terrain boundary hits + preference vector reward."""
+    """V3: V1 features + real terrain boundary hits. pref_vec disabled (wall-hugging fix)."""
 
-    PREF_VECTOR_REWARD_COEFF = 0.2
+    PREF_VECTOR_REWARD_COEFF = 0.0
 
     def get_semantic_lidar_data(self, states, obstacles, bridge_center, bridge_gap_width,
                                 bridge_wall_thickness, bridge_theta, terrain_config,
-                                bridge_length=1.0, bridge_bend_angle=0.0):
+                                bridge_length=1.0, bridge_bend_angle=0.0, **kwargs):
         """Use real terrain-boundary lidar (skips V1's all-grass override)."""
         lidar_data, terrain_ids = jax_vmap(
             ft.partial(
@@ -717,7 +717,7 @@ class LidarTargetV4(LidarTargetV2):
 
     def get_semantic_lidar_data(self, states, obstacles, bridge_center, bridge_gap_width,
                                 bridge_wall_thickness, bridge_theta, terrain_config,
-                                bridge_length=1.0, bridge_bend_angle=0.0):
+                                bridge_length=1.0, bridge_bend_angle=0.0, **kwargs):
         """Use real terrain-boundary lidar (skips V1's all-grass override)."""
         lidar_data, terrain_ids = jax_vmap(
             ft.partial(
@@ -735,3 +735,166 @@ class LidarTargetV4(LidarTargetV2):
             )
         )(states[:, :2])
         return lidar_data, terrain_ids
+
+
+# ---------------------------------------------------------------------------
+# Domain Randomized Terrain (DRT): per-episode 50/50 real vs hardcoded
+# ---------------------------------------------------------------------------
+
+class LidarTargetDRT(LidarTargetV1):
+    """DRT: per-episode 50/50 real terrain boundaries vs hardcoded (Grass)."""
+
+    PREF_VECTOR_REWARD_COEFF = 0.0
+    TERRAIN_REWARD_COEFF = 0.0
+
+    def reset(self, key, **kwargs):
+        graph = super().reset(key, **kwargs)
+        es = graph.env_states
+        k1, k2 = jr.split(es.key)
+        use_real = jr.bernoulli(k1).astype(jnp.int32)
+        es = es._replace(key=k2, use_real_terrain=use_real)
+        lidar_data, terrain_ids = self.get_semantic_lidar_data(
+            es.agent, es.obstacle,
+            es.bridge_center, es.bridge_gap_width,
+            es.bridge_wall_thickness, es.bridge_theta, es.terrain_config,
+            bridge_length=es.bridge_length,
+            bridge_bend_angle=es.bridge_bend_angle,
+            use_real_terrain=use_real,
+        )
+        es = es._replace(
+            lidar_hit_positions=merge01(lidar_data),
+            lidar_hit_terrain_ids=merge01(terrain_ids),
+        )
+        return self.get_graph(es, lidar_data)
+
+    def get_semantic_lidar_data(self, states, obstacles, bridge_center, bridge_gap_width,
+                                bridge_wall_thickness, bridge_theta, terrain_config,
+                                bridge_length=1.0, bridge_bend_angle=0.0, **kwargs):
+        """Compute both real and hardcoded terrain; select based on use_real_terrain flag."""
+        use_real_terrain = kwargs.get('use_real_terrain', jnp.array(1, dtype=jnp.int32))
+
+        real_data, real_ids = jax_vmap(
+            ft.partial(
+                _get_semantic_lidar_single_real,
+                obstacles=obstacles,
+                bridge_center=bridge_center,
+                bridge_gap_width=bridge_gap_width,
+                bridge_wall_thickness=bridge_wall_thickness,
+                bridge_theta=bridge_theta,
+                terrain_config=terrain_config,
+                num_beams=self._params["n_rays"],
+                sense_range=self._params["comm_radius"],
+                bridge_length=bridge_length,
+                bridge_bend_angle=bridge_bend_angle,
+            )
+        )(states[:, :2])
+
+        from dgppo.env.lidar_env.base import LidarEnv
+        fake_data, fake_ids = LidarEnv.get_semantic_lidar_data(
+            self, states, obstacles, bridge_center, bridge_gap_width,
+            bridge_wall_thickness, bridge_theta, terrain_config,
+            bridge_length=bridge_length, bridge_bend_angle=bridge_bend_angle,
+        )
+        n_rays = self._params["n_rays"]
+        fake_ids = fake_ids.at[:, n_rays:].set(1)
+
+        data = jnp.where(use_real_terrain, real_data, fake_data)
+        ids = jnp.where(use_real_terrain, real_ids, fake_ids)
+        return data, ids
+
+
+# ---------------------------------------------------------------------------
+# Fixed Lag Mixin: adds obs + act delay via FIFO buffers
+# ---------------------------------------------------------------------------
+
+class _FixedLagMixin:
+    """Mixin that adds fixed obs and action delay. Subclasses must set OBS_DELAY_STEPS and ACT_DELAY_STEPS."""
+
+    OBS_DELAY_STEPS: int
+    ACT_DELAY_STEPS: int
+
+    def reset(self, key, **kwargs):
+        graph = super().reset(key, **kwargs)
+        es = graph.env_states
+        n_rays = self._params["n_rays"]
+
+        init_obs = es.obs_agent if es.obs_agent.shape[0] > 0 else es.agent
+        init_lidar = jnp.reshape(
+            es.lidar_hit_positions[:2 * n_rays * self.num_agents],
+            (self.num_agents, 2 * n_rays, 2),
+        )
+
+        obs_buf = jnp.tile(init_obs[None], (self.OBS_DELAY_STEPS, 1, 1))
+        lid_buf = jnp.tile(init_lidar[None], (self.OBS_DELAY_STEPS, 1, 1, 1))
+        act_buf = jnp.zeros(
+            (self.ACT_DELAY_STEPS, self.num_agents, self.action_dim), dtype=jnp.float32
+        )
+
+        es = es._replace(
+            obs_agent_buffer=obs_buf,
+            lidar_buffer=lid_buf,
+            action_buffer=act_buf,
+        )
+        return self.get_graph(es, init_lidar)
+
+    def _apply_obs_delay(self, obs_agent, noisy_lidar, env_state):
+        buf_obs = env_state.obs_agent_buffer
+        buf_lid = env_state.lidar_buffer
+        delayed_obs = buf_obs[0]
+        delayed_lid = buf_lid[0]
+        new_buf_obs = jnp.concatenate([buf_obs[1:], obs_agent[None]], axis=0)
+        new_buf_lid = jnp.concatenate([buf_lid[1:], noisy_lidar[None]], axis=0)
+        return delayed_obs, delayed_lid, env_state._replace(
+            obs_agent_buffer=new_buf_obs,
+            lidar_buffer=new_buf_lid,
+        )
+
+    def _get_executed_action(self, action, env_state):
+        buf = env_state.action_buffer
+        delayed_action = buf[0]
+        new_buf = jnp.concatenate([buf[1:], action[None]], axis=0)
+        return delayed_action, env_state._replace(action_buffer=new_buf)
+
+
+# ---------------------------------------------------------------------------
+# Group A: rnn_step=16, scaled lag (obs=1, act=7, total=8 steps, 267ms)
+# ---------------------------------------------------------------------------
+
+class LidarTargetBFLag8(_FixedLagMixin, LidarTargetV1):
+    """BF-Lag8: Boundaries Fake + 267ms lag (1+7 steps)."""
+    OBS_DELAY_STEPS = 1
+    ACT_DELAY_STEPS = 7
+
+
+class LidarTargetBRLag8(_FixedLagMixin, LidarTargetV3):
+    """BR-Lag8: Boundaries Real + 267ms lag (1+7 steps)."""
+    OBS_DELAY_STEPS = 1
+    ACT_DELAY_STEPS = 7
+
+
+class LidarTargetDRTLag8(_FixedLagMixin, LidarTargetDRT):
+    """DRT-Lag8: Domain Randomized Terrain + 267ms lag (1+7 steps)."""
+    OBS_DELAY_STEPS = 1
+    ACT_DELAY_STEPS = 7
+
+
+# ---------------------------------------------------------------------------
+# Group B: rnn_step=32, full Spot lag (obs=2, act=13, total=15 steps, 500ms)
+# ---------------------------------------------------------------------------
+
+class LidarTargetBFLag15(_FixedLagMixin, LidarTargetV1):
+    """BF-Lag15: Boundaries Fake + 500ms lag (2+13 steps)."""
+    OBS_DELAY_STEPS = 2
+    ACT_DELAY_STEPS = 13
+
+
+class LidarTargetBRLag15(_FixedLagMixin, LidarTargetV3):
+    """BR-Lag15: Boundaries Real + 500ms lag (2+13 steps)."""
+    OBS_DELAY_STEPS = 2
+    ACT_DELAY_STEPS = 13
+
+
+class LidarTargetDRTLag15(_FixedLagMixin, LidarTargetDRT):
+    """DRT-Lag15: Domain Randomized Terrain + 500ms lag (2+13 steps)."""
+    OBS_DELAY_STEPS = 2
+    ACT_DELAY_STEPS = 13

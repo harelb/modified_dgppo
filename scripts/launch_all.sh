@@ -2,7 +2,7 @@
 # launch_all.sh — submit all variants with GPU preference + timeout fallback
 #
 # Tries each GPU type in order; if a job is still pending after WAIT_MIN
-# minutes it cancels and tries the next type. All four variants run their
+# minutes it cancels and tries the next type. All variants run their
 # fallback loops in parallel.
 #
 # Usage (run inside tmux so it survives logout):
@@ -14,7 +14,7 @@ GPU_PRIORITY=(h100 a100 l40s a40)       # order of preference; best first
 WAIT_MIN=10                              # minutes to wait before trying next GPU
 LOG_DIR="${HOME}/orcd/scratch/dgppo/logs"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VARIANTS=(v1 v2 v3 v4)
+VARIANTS=(bf_lag8 br_lag8 drt_lag8 bf_lag15 br_lag15 drt_lag15)
 # ─────────────────────────────────────────────────────────────────────────────
 
 mkdir -p "$LOG_DIR"

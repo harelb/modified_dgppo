@@ -52,6 +52,13 @@ class LidarEnvState(NamedTuple):
     obs_agent: jnp.ndarray = jnp.zeros((0, 4))               # noisy agent obs; (0,4)=use true state
     action_buffer: jnp.ndarray = jnp.zeros((0, 2))           # delay buffer; (0,2)=no delay
 
+    # Observation delay buffers (lag variants)
+    obs_agent_buffer: jnp.ndarray = jnp.zeros((0, 0, 4))    # (buf_size, n_agents, 4)
+    lidar_buffer: jnp.ndarray = jnp.zeros((0, 0, 0, 2))     # (buf_size, n_agents, 2*n_rays, 2)
+
+    # Terrain randomization flag (DRT) — sampled once per episode at reset
+    use_real_terrain: jnp.ndarray = jnp.ones((), dtype=jnp.int32)  # 1=real, 0=hardcoded
+
     @property
     def n_agent(self) -> int:
         return self.agent.shape[0]
@@ -200,7 +207,7 @@ def _get_semantic_lidar_single(
     # Matches execution: spot_dgppo_ros_node.py bnd_hits = np.zeros((n_rays, 2))
     # and all_terrain_ids = np.ones(2*n_rays).
     obs_hits      = agent_pos[None, :] + alphas_obs[:, None] * sense_range * dirs  # (B, 2)
-    boundary_hits = jnp.zeros_like(obs_hits)                                        # (B, 2)
+    boundary_hits = agent_pos[None, :] + sense_range * dirs                          # (B, 2)
     hit_points    = jnp.concatenate([obs_hits, boundary_hits])                      # (2B, 2)
 
     terrain_ids = jnp.ones(2 * num_beams, dtype=jnp.int32)  # all Grass, matches execution
@@ -775,6 +782,7 @@ class LidarEnv(MultiAgentEnv, ABC):
             terrain_config_env_state,
             bridge_length=bridge_length_env_state,
             bridge_bend_angle=bridge_bend_angle_env_state,
+            use_real_terrain=jnp.array(1, dtype=jnp.int32),
         )
         n_full = self.num_agents * 2 * self._params["n_rays"]
         if lidar_data is not None:
@@ -852,6 +860,7 @@ class LidarEnv(MultiAgentEnv, ABC):
         terrain_config: jnp.ndarray,
         bridge_length: jnp.ndarray = 1.0,
         bridge_bend_angle: jnp.ndarray = 0.0,
+        **kwargs,
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """
         Per-ray semantic lidar.
@@ -1002,12 +1011,16 @@ class LidarEnv(MultiAgentEnv, ABC):
             bridge_wall_thickness, bridge_theta, terrain_config,
             bridge_length=bridge_length,
             bridge_bend_angle=bridge_bend_angle,
+            use_real_terrain=env_state_updated.use_real_terrain,
         )
         lidar_hit_terrain_ids_next = merge01(lidar_terrain_ids_next)  # (n_agents * 2*n_rays,)
         lidar_hit_positions_next   = merge01(lidar_data_next)         # (n_agents * 2*n_rays, 2)
 
         step_key, k_noise = jr.split(env_state_updated.key)
         obs_agent, noisy_lidar = self._obs_noise(next_agent_base_states, lidar_data_next, k_noise)
+        obs_agent, noisy_lidar, env_state_updated = self._apply_obs_delay(
+            obs_agent, noisy_lidar, env_state_updated
+        )
 
         next_env_state = LidarEnvState(
             next_agent_base_states,
@@ -1031,6 +1044,9 @@ class LidarEnv(MultiAgentEnv, ABC):
             key=step_key,
             obs_agent=obs_agent,
             action_buffer=env_state_updated.action_buffer,
+            obs_agent_buffer=env_state_updated.obs_agent_buffer,
+            lidar_buffer=env_state_updated.lidar_buffer,
+            use_real_terrain=env_state_updated.use_real_terrain,
         )
 
         info = {}
@@ -1217,6 +1233,15 @@ class LidarEnv(MultiAgentEnv, ABC):
     ) -> Tuple[Action, "LidarEnvState"]:
         """Returns (executed_action, updated_env_state). Base: action executes immediately."""
         return action, env_state
+
+    def _apply_obs_delay(
+        self,
+        obs_agent: jnp.ndarray,
+        noisy_lidar: Optional[jnp.ndarray],
+        env_state: "LidarEnvState",
+    ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], "LidarEnvState"]:
+        """Returns (delayed_obs_agent, delayed_lidar, updated_env_state). Base: no delay."""
+        return obs_agent, noisy_lidar, env_state
 
     def _obs_noise(
         self,

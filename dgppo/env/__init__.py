@@ -2,7 +2,12 @@ from typing import Optional
 
 from .base import MultiAgentEnv
 from dgppo.env.mpe import MPETarget, MPESpread, MPELine, MPEFormation, MPECorridor, MPEConnectSpread
-from dgppo.env.lidar_env import LidarSpread, LidarTarget, LidarLine, LidarTargetV1, LidarTargetV2, LidarTargetV3, LidarTargetV4 #, LidarBicycleTarget
+from dgppo.env.lidar_env import (
+    LidarSpread, LidarTarget, LidarLine, LidarTargetV1, LidarTargetV2, LidarTargetV3, LidarTargetV4,
+    LidarTargetDRT,
+    LidarTargetBFLag8, LidarTargetBRLag8, LidarTargetDRTLag8,
+    LidarTargetBFLag15, LidarTargetBRLag15, LidarTargetDRTLag15,
+)  #, LidarBicycleTarget
 from dgppo.env.vmas import VMASWheel, VMASReverseTransport
 
 
@@ -24,6 +29,13 @@ ENV = {
     'LidarTargetV2': LidarTargetV2,
     'LidarTargetV3': LidarTargetV3,
     'LidarTargetV4': LidarTargetV4,
+    'LidarTargetDRT': LidarTargetDRT,
+    'LidarTargetBFLag8': LidarTargetBFLag8,
+    'LidarTargetBRLag8': LidarTargetBRLag8,
+    'LidarTargetDRTLag8': LidarTargetDRTLag8,
+    'LidarTargetBFLag15': LidarTargetBFLag15,
+    'LidarTargetBRLag15': LidarTargetBRLag15,
+    'LidarTargetDRTLag15': LidarTargetDRTLag15,
 }
 
 
