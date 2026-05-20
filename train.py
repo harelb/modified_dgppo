@@ -8,6 +8,11 @@ import yaml
 import glob # Added for finding latest checkpoint
 import json # Added for loading best model info
 
+import jax
+jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+
 from dgppo.algo import make_algo
 from dgppo.env import make_env
 from dgppo.trainer.trainer import Trainer
