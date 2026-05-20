@@ -826,9 +826,12 @@ class _FixedLagMixin:
 
         obs_buf = jnp.tile(init_obs[None], (self.OBS_DELAY_STEPS, 1, 1))
         lid_buf = jnp.tile(init_lidar[None], (self.OBS_DELAY_STEPS, 1, 1, 1))
-        act_buf = jnp.zeros(
-            (self.ACT_DELAY_STEPS, self.num_agents, self.action_dim), dtype=jnp.float32
+        k_act, k_rest = jr.split(es.key)
+        act_buf = jr.uniform(
+            k_act, (self.ACT_DELAY_STEPS, self.num_agents, self.action_dim),
+            minval=-0.3, maxval=0.3,
         )
+        es = es._replace(key=k_rest)
 
         es = es._replace(
             obs_agent_buffer=obs_buf,
