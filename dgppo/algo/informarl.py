@@ -287,7 +287,7 @@ class InforMARL(Algorithm):
             value, new_rnn_state = self.Vl.get_value(Vl_params, graph, rnn_state)
             return new_rnn_state, (value, rnn_state)
 
-        final_rnn_state, (T11_Vl, T_rnn_states) = jax.lax.scan(body_, init_Vl_rnn_state, T_graphs)
+        final_rnn_state, (T11_Vl, T_rnn_states) = jax.lax.scan(body_, init_Vl_rnn_state, T_graphs, unroll=4)
         T_Vl = T11_Vl.squeeze(1).squeeze(1)
 
         return T_Vl, T_rnn_states, final_rnn_state
@@ -346,7 +346,7 @@ class InforMARL(Algorithm):
             return (Vl_model, policy_model), (Vl_info | policy_info)
 
         (Vl_train_state, policy_train_state), info = lax.scan(
-            update_fn, (Vl_train_state, policy_train_state), batch_idx
+            update_fn, (Vl_train_state, policy_train_state), batch_idx, unroll=2
         )
 
         # get training info of the last PPO epoch
@@ -397,7 +397,7 @@ class InforMARL(Algorithm):
             log_pi, entropy, new_rnn_state = self.policy.eval_action(actor_params, graph, action, rnn_state, key)
             return new_rnn_state, (log_pi, entropy, rnn_state)
 
-        final_rnn_state, outputs = jax.lax.scan(body_, init_rnn_state, (T_graphs, Ta_actions, T_action_keys))
+        final_rnn_state, outputs = jax.lax.scan(body_, init_rnn_state, (T_graphs, Ta_actions, T_action_keys), unroll=4)
         Ta_log_pis, Ta_entropies, T_rnn_states = outputs
 
         return Ta_log_pis, Ta_entropies, T_rnn_states, final_rnn_state

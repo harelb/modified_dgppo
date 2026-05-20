@@ -165,11 +165,12 @@ class InforMARLLagr(InforMARL):
             Vh, new_rnn_state = self.Vh.get_value(Vh_params, graph, rnn_state)
             return new_rnn_state, (Vh, rnn_state)
 
-        final_rnn_state, (Tah_Vh, T_rnn_states) = jax.lax.scan(body_, init_rnn_state, T_graphs)
+        final_rnn_state, (Tah_Vh, T_rnn_states) = jax.lax.scan(body_, init_rnn_state, T_graphs, unroll=4)
 
         return Tah_Vh, T_rnn_states, final_rnn_state
 
-    @ft.partial(jax.jit, static_argnums=(0,))
+    @ft.partial(jax.jit, static_argnums=(0,),
+                donate_argnames=("Vl_train_state", "Vh_train_state", "policy_train_state"))
     def update_inner(
             self,
             Vl_train_state: TrainState,
@@ -216,7 +217,7 @@ class InforMARLLagr(InforMARL):
         # calculate Dec-OCP GAE
         bTah_Qh, bT_Ql = jax.vmap(
             ft.partial(compute_dec_ocp_gae, disc_gamma=self.gamma, gae_lambda=self.gae_lambda)
-        )(Tah_hs=jnp.clip(rollout.costs, a_min=0),
+        )(Tah_hs=jnp.clip(rollout.costs, 0),
           T_l=-rollout.rewards,
           Tp1ah_Vh=bTp1ah_Vh,
           Tp1_Vl=bTp1_Vl)
@@ -253,7 +254,7 @@ class InforMARLLagr(InforMARL):
             return (Vl_model, Vh_model, policy_model, lagr_lambda), (Vl_info | Vh_info | policy_info | lagr_info)
 
         (Vl_train_state, Vh_train_state, policy_train_state, ah_lagr), update_info = jax.lax.scan(
-            update_fn, (Vl_train_state, Vh_train_state, policy_train_state, ah_lagr), batch_idx)
+            update_fn, (Vl_train_state, Vh_train_state, policy_train_state, ah_lagr), batch_idx, unroll=2)
 
         # get training info of the last PPO epoch
         info = jtu.tree_map(lambda x: x[-1], update_info)
