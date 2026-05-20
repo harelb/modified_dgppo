@@ -165,12 +165,11 @@ class InforMARLLagr(InforMARL):
             Vh, new_rnn_state = self.Vh.get_value(Vh_params, graph, rnn_state)
             return new_rnn_state, (Vh, rnn_state)
 
-        final_rnn_state, (Tah_Vh, T_rnn_states) = jax.lax.scan(body_, init_rnn_state, T_graphs, unroll=4)
+        final_rnn_state, (Tah_Vh, T_rnn_states) = jax.lax.scan(body_, init_rnn_state, T_graphs)
 
         return Tah_Vh, T_rnn_states, final_rnn_state
 
-    @ft.partial(jax.jit, static_argnums=(0,),
-                donate_argnames=("Vl_train_state", "Vh_train_state", "policy_train_state"))
+    @ft.partial(jax.jit, static_argnums=(0,))
     def update_inner(
             self,
             Vl_train_state: TrainState,
