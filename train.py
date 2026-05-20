@@ -169,9 +169,9 @@ def train(args):
             log_dir_suffix = f"seed{args.seed}_{start_time_str}_{rand_id}"
             log_dir = os.path.join(base_log_path, log_dir_suffix)
 
-        run_name = "{}_seed{:03}_{}_{}".format(args.algo, args.seed, start_time_str, rand_id)
+        run_name = "{}_{}_seed{:03}_{}_{}".format(args.env, args.algo, args.seed, start_time_str, rand_id)
         if args.name is not None:
-            run_name = "{}_{}".format(args.name, run_name) # Adjusted for clarity
+            run_name = "{}_{}".format(args.name, run_name)
 
     # create algorithm (uses 'args' which might have been updated from loaded_config)
     algo = make_algo(
@@ -206,7 +206,8 @@ def train(args):
         lr_lagr=args.lr_lagr,
         train_steps=args.steps, # This is the total steps for the *new* run
         cbf_schedule=not args.no_cbf_schedule, # Note: if no_cbf_schedule is True, cbf_schedule becomes False
-        cost_schedule=args.cost_schedule
+        cost_schedule=args.cost_schedule,
+        chunk_size=args.chunk_size,
     )
 
     # Load algorithm state if resuming
@@ -295,6 +296,8 @@ def main():
     parser.add_argument("--use-lstm", action="store_true", default=False)
     parser.add_argument("--coef-ent", type=float, default=1e-2)
     parser.add_argument("--rnn-step", type=int, default=16)
+    parser.add_argument("--chunk-size", type=int, default=1,
+                        help="Action chunking: policy outputs chunk_size actions, executed open-loop")
 
     # default arguments
     parser.add_argument("--n-env-train", type=int, default=128)

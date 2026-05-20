@@ -5,6 +5,7 @@ from dgppo.env.mpe import MPETarget, MPESpread, MPELine, MPEFormation, MPECorrid
 from dgppo.env.lidar_env import (
     LidarSpread, LidarTarget, LidarLine, LidarTargetV1, LidarTargetV2, LidarTargetV3, LidarTargetV4,
     LidarTargetDRT,
+    LidarTargetBFLag2, LidarTargetBFLag2NoAug,
     LidarTargetBFLag8, LidarTargetBRLag8, LidarTargetDRTLag8,
     LidarTargetBFLag15, LidarTargetBRLag15, LidarTargetDRTLag15,
 )  #, LidarBicycleTarget
@@ -30,6 +31,8 @@ ENV = {
     'LidarTargetV3': LidarTargetV3,
     'LidarTargetV4': LidarTargetV4,
     'LidarTargetDRT': LidarTargetDRT,
+    'LidarTargetBFLag2': LidarTargetBFLag2,
+    'LidarTargetBFLag2NoAug': LidarTargetBFLag2NoAug,
     'LidarTargetBFLag8': LidarTargetBFLag8,
     'LidarTargetBRLag8': LidarTargetBRLag8,
     'LidarTargetDRTLag8': LidarTargetDRTLag8,

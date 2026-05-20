@@ -56,12 +56,14 @@ class DGPPO(InforMARLLagr):
             cbf_weight: float = 1.0,
             train_steps: int = 1e5,
             cbf_schedule: bool = True,
+            chunk_size: int = 1,
             **kwargs
     ):
         super(DGPPO, self).__init__(
             env, node_dim, edge_dim, state_dim, action_dim, n_agents, actor_gnn_layers, Vl_gnn_layers, Vh_gnn_layers,
             gamma, lr_actor, lr_Vl, lr_Vh, batch_size, epoch_ppo, clip_eps, gae_lambda, coef_ent, max_grad_norm, seed,
-            use_rnn, rnn_layers, rnn_step, use_lstm
+            use_rnn, rnn_layers, rnn_step, use_lstm,
+            chunk_size=chunk_size,
         )
 
         # set hyperparameters
@@ -110,7 +112,8 @@ class DGPPO(InforMARLLagr):
             return det_rollout_fn(self._env,
                                   ft.partial(self.act, params=cur_params),
                                   self.init_rnn_state,
-                                  cur_key)
+                                  cur_key,
+                                  chunk_size=self.chunk_size)
 
         def det_rollout_fn_(cur_params, cur_keys):
             return jax.vmap(ft.partial(det_rollout_fn_single_, cur_params))(cur_keys)

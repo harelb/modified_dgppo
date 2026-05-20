@@ -433,9 +433,18 @@ class LidarEnv(MultiAgentEnv, ABC):
         return 3  # Road=0, Grass=1, Sidewalk=2
 
     @property
+    def agent_extra_dim(self) -> int:
+        """Extra features appended to agent nodes (e.g., flattened action buffer). Base: 0."""
+        return 0
+
+    def _agent_extra_features(self, state: "LidarEnvState") -> jnp.ndarray:
+        """Returns (n_agents, agent_extra_dim) extra features for agent nodes. Base: empty."""
+        return jnp.zeros((self.num_agents, 0), dtype=jnp.float32)
+
+    @property
     def node_dim(self) -> int:
         # +4 indicators: is_obs | is_terrain_boundary | is_goal | is_agent
-        return self.state_dim + self.bearing_dim + 3 * self.cluster_oh_dim + self.terrain_oh_dim + 4
+        return self.state_dim + self.bearing_dim + 3 * self.cluster_oh_dim + self.terrain_oh_dim + 4 + self.agent_extra_dim
     
     @property
     def edge_dim(self) -> int:

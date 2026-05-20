@@ -54,6 +54,7 @@ class InforMARL(Algorithm):
             use_lstm: bool = False,
             cost_schedule: bool = False,
             train_steps: int = 1e5,
+            chunk_size: int = 1,
             **kwargs
     ):
         super(InforMARL, self).__init__(
@@ -63,6 +64,7 @@ class InforMARL(Algorithm):
             action_dim=action_dim,
             n_agents=n_agents
         )
+        self.chunk_size = chunk_size
 
         # set hyperparameters
         self.cost_weight = cost_weight
@@ -98,12 +100,13 @@ class InforMARL(Algorithm):
         )
         self.nominal_graph = nominal_graph
 
-        # set up PPO policy
+        # set up PPO policy (output dim = chunk_size * action_dim for action chunking)
+        policy_output_dim = self.action_dim * self.chunk_size
         self.policy = PPOPolicy(
             node_dim=self.node_dim,
             edge_dim=self.edge_dim,
             n_agents=self.n_agents,
-            action_dim=self.action_dim,
+            action_dim=policy_output_dim,
             use_rnn=self.use_rnn,
             rnn_layers=self.rnn_layers,
             gnn_layers=self.actor_gnn_layers,
@@ -178,7 +181,8 @@ class InforMARL(Algorithm):
             return rollout_fn(self._env,
                               ft.partial(self.step, params=cur_params),
                               self.init_rnn_state,
-                              cur_key)
+                              cur_key,
+                              chunk_size=self.chunk_size)
 
         def rollout_fn_(cur_params, cur_keys):
             return jax.vmap(ft.partial(rollout_fn_single_, cur_params))(cur_keys)
@@ -217,7 +221,8 @@ class InforMARL(Algorithm):
             'rnn_layers': self.rnn_layers,
             'rnn_step': self.rnn_step,
             'use_lstm': self.use_lstm,
-            'cost_schedule': self.cost_schedule
+            'cost_schedule': self.cost_schedule,
+            'chunk_size': self.chunk_size
         }
 
     @property
@@ -248,7 +253,7 @@ class InforMARL(Algorithm):
         if params is None:
             params = self.params
         action, log_pi, rnn_state = self.policy_train_state.apply_fn(params["policy"], graph, rnn_state, key)
-        assert action.shape == (self.n_agents, self.action_dim)
+        assert action.shape == (self.n_agents, self.action_dim * self.chunk_size)
         return action, log_pi, rnn_state
 
     def collect(self, params: Params, b_key: PRNGKey) -> Rollout:

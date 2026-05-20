@@ -813,6 +813,21 @@ class _FixedLagMixin:
     OBS_DELAY_STEPS: int
     ACT_DELAY_STEPS: int
 
+    @property
+    def agent_extra_dim(self) -> int:
+        return self.ACT_DELAY_STEPS * self.action_dim
+
+    def _fill_action_buf_features(self, graph, action_buffer):
+        """Inject flattened action buffer into agent node features."""
+        expected_size = self.ACT_DELAY_STEPS * self.action_dim
+        buf_flat = action_buffer.reshape(-1)
+        IND = self.state_dim + self.bearing_dim + 3 * self.n_cluster + self.terrain_oh_dim
+        extra_start = IND + 4
+        new_nodes = graph.nodes.at[:self.num_agents, extra_start:extra_start + expected_size].set(
+            jnp.tile(buf_flat[None], (self.num_agents, 1))
+        )
+        return graph._replace(nodes=new_nodes)
+
     def reset(self, key, **kwargs):
         graph = super().reset(key, **kwargs)
         es = graph.env_states
@@ -841,7 +856,8 @@ class _FixedLagMixin:
             action_buffer=act_buf,
             reward_buffer=reward_buf,
         )
-        return self.get_graph(es, init_lidar)
+        graph = self.get_graph(es, init_lidar)
+        return self._fill_action_buf_features(graph, act_buf)
 
     def step(self, graph, action, **kwargs):
         next_graph, reward, cost, done, info = super().step(graph, action, **kwargs)
@@ -850,7 +866,9 @@ class _FixedLagMixin:
         delayed_reward = buf[0]
         new_buf = jnp.concatenate([buf[1:], reward[None]])
         new_es = es._replace(reward_buffer=new_buf)
-        return next_graph._replace(env_states=new_es), delayed_reward, cost, done, info
+        next_graph = next_graph._replace(env_states=new_es)
+        next_graph = self._fill_action_buf_features(next_graph, new_es.action_buffer)
+        return next_graph, delayed_reward, cost, done, info
 
     def _apply_obs_delay(self, obs_agent, noisy_lidar, env_state):
         buf_obs = env_state.obs_agent_buffer
@@ -869,6 +887,29 @@ class _FixedLagMixin:
         delayed_action = buf[0]
         new_buf = jnp.concatenate([buf[1:], action[None]], axis=0)
         return delayed_action, env_state._replace(action_buffer=new_buf)
+
+
+# ---------------------------------------------------------------------------
+# Minimal lag (for testing if PPO can learn with any delay at all)
+# ---------------------------------------------------------------------------
+
+class LidarTargetBFLag2(_FixedLagMixin, LidarTargetV1):
+    """BF-Lag2: Boundaries Fake + minimal 2-step lag (1+1 steps, 66ms)."""
+    OBS_DELAY_STEPS = 1
+    ACT_DELAY_STEPS = 1
+
+
+class LidarTargetBFLag2NoAug(_FixedLagMixin, LidarTargetV1):
+    """BF-Lag2 without augmented state — isolates delay amount vs observation."""
+    OBS_DELAY_STEPS = 1
+    ACT_DELAY_STEPS = 1
+
+    @property
+    def agent_extra_dim(self) -> int:
+        return 0
+
+    def _fill_action_buf_features(self, graph, action_buffer):
+        return graph
 
 
 # ---------------------------------------------------------------------------

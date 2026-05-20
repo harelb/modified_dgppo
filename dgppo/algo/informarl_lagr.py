@@ -53,12 +53,14 @@ class InforMARLLagr(InforMARL):
             use_lstm: bool = False,
             lagr_init: float = 0.78,
             lr_lagr: float = 1e-7,
+            chunk_size: int = 1,
             **kwargs
     ):
         super(InforMARLLagr, self).__init__(
             env, node_dim, edge_dim, state_dim, action_dim, n_agents, 0., actor_gnn_layers, Vl_gnn_layers,
             gamma, lr_actor, lr_Vl, batch_size, epoch_ppo, clip_eps, gae_lambda, coef_ent, max_grad_norm, seed,
-            use_rnn, rnn_layers, rnn_step, use_lstm
+            use_rnn, rnn_layers, rnn_step, use_lstm,
+            chunk_size=chunk_size,
         )
 
         # set hyperparameters

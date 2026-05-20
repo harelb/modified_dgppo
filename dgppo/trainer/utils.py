@@ -24,6 +24,7 @@ def rollout(
         actor: Callable,
         init_rnn_state: Array,
         key: PRNGKey,
+        chunk_size: int = 1,
 ) -> Rollout:
     """
     Get a rollout from the environment using the actor.
@@ -34,11 +35,15 @@ def rollout(
     actor: Callable, [GraphsTuple, Array, RNN_States, PRNGKey] -> [Action, LogPi, RNN_States]
     init_rnn_state: Array
     key: PRNGKey
+    chunk_size: int, if > 1, actor outputs chunk_size * action_dim and actions are executed open-loop
 
     Returns
     -------
     data: Rollout
     """
+    if chunk_size > 1:
+        return _chunked_rollout(env, actor, init_rnn_state, key, chunk_size)
+
     key_x0, key_z0, key = jax.random.split(key, 3)
     init_graph = env.reset(key_x0)
 
@@ -55,6 +60,48 @@ def rollout(
         jax.lax.scan(body, (init_graph, init_rnn_state), keys, length=env.max_episode_steps))
     rollout_data = Rollout(graphs, actions, rnn_states, rewards, costs, dones, log_pis, next_graphs)
     return rollout_data
+
+
+def _chunked_rollout(
+        env: MultiAgentEnv,
+        actor: Callable,
+        init_rnn_state: Array,
+        key: PRNGKey,
+        chunk_size: int,
+) -> Rollout:
+    """Rollout with action chunking — policy called every chunk_size steps, actions executed open-loop."""
+    key_x0, key = jax.random.split(key)
+    init_graph = env.reset(key_x0)
+    n_chunks = env.max_episode_steps // chunk_size
+    action_dim = env.action_dim
+
+    def chunk_body(carry, chunk_key):
+        graph, rnn_state = carry
+        flat_action, log_pi, new_rnn_state = actor(graph, rnn_state, chunk_key)
+        chunk_actions = flat_action.reshape(env.num_agents, chunk_size, action_dim)
+
+        def step_body(graph, step_idx):
+            action = chunk_actions[:, step_idx, :]
+            next_graph, reward, cost, done, info = env.step(graph, action)
+            return next_graph, (reward, cost, done)
+
+        final_graph, (step_rewards, step_costs, step_dones) = jax.lax.scan(
+            step_body, graph, jnp.arange(chunk_size)
+        )
+
+        chunk_reward = step_rewards.sum(axis=0)
+        chunk_cost = step_costs.max(axis=0)
+        chunk_done = jnp.any(step_dones, axis=0)
+
+        return (final_graph, new_rnn_state), (
+            graph, flat_action, rnn_state, chunk_reward, chunk_cost, chunk_done, log_pi, final_graph
+        )
+
+    chunk_keys = jax.random.split(key, n_chunks)
+    _, (graphs, actions, rnn_states, rewards, costs, dones, log_pis, next_graphs) = jax.lax.scan(
+        chunk_body, (init_graph, init_rnn_state), chunk_keys, length=n_chunks
+    )
+    return Rollout(graphs, actions, rnn_states, rewards, costs, dones, log_pis, next_graphs)
 
 
 # # MODIFIED: Corrected test_rollout to accept a start_graph
@@ -103,27 +150,59 @@ def test_rollout(
         actor: Callable,
         init_rnn_state: Array,
         key: PRNGKey,
-        stochastic: bool = False
+        stochastic: bool = False,
+        chunk_size: int = 1,
 ):
     key_x0, key = jax.random.split(key)
     init_graph = env.reset(key_x0)
 
-    def body_(data, key_):
-        graph, rnn_state = data
-        if not stochastic:
-            action, rnn_state = actor(graph, rnn_state)
-        else:
-            action, rnn_state = actor(graph, rnn_state, key_)
-        next_graph, reward, cost, done, info = env.step(graph, action, get_eval_info=True)
-        return (next_graph, rnn_state), (graph, action, rnn_state, reward, cost, done, None, next_graph)
+    if chunk_size > 1:
+        n_chunks = env.max_episode_steps // chunk_size
+        action_dim = env.action_dim
 
-    keys = jax.random.split(key, env.max_episode_steps)
-    _, (graphs, actions, actor_rnn_states, rewards, costs, dones, log_pis, next_graphs) = (
-        jax.lax.scan(body_,
-                     (init_graph, init_rnn_state),
-                     keys,
-                     length=env.max_episode_steps))
-    rollout_data = Rollout(graphs, actions, actor_rnn_states, rewards, costs, dones, log_pis, next_graphs)
+        def chunk_body(carry, chunk_key):
+            graph, rnn_state = carry
+            if not stochastic:
+                flat_action, rnn_state = actor(graph, rnn_state)
+            else:
+                flat_action, rnn_state = actor(graph, rnn_state, chunk_key)
+            chunk_actions = flat_action.reshape(env.num_agents, chunk_size, action_dim)
+
+            def step_body(graph, step_idx):
+                action = chunk_actions[:, step_idx, :]
+                next_graph, reward, cost, done, info = env.step(graph, action, get_eval_info=True)
+                return next_graph, (reward, cost, done)
+
+            final_graph, (step_rewards, step_costs, step_dones) = jax.lax.scan(
+                step_body, graph, jnp.arange(chunk_size)
+            )
+            chunk_reward = step_rewards.sum(axis=0)
+            chunk_cost = step_costs.max(axis=0)
+            chunk_done = jnp.any(step_dones, axis=0)
+            return (final_graph, rnn_state), (graph, flat_action, rnn_state, chunk_reward, chunk_cost, chunk_done, None, final_graph)
+
+        chunk_keys = jax.random.split(key, n_chunks)
+        _, (graphs, actions, actor_rnn_states, rewards, costs, dones, log_pis, next_graphs) = jax.lax.scan(
+            chunk_body, (init_graph, init_rnn_state), chunk_keys, length=n_chunks
+        )
+        rollout_data = Rollout(graphs, actions, actor_rnn_states, rewards, costs, dones, log_pis, next_graphs)
+    else:
+        def body_(data, key_):
+            graph, rnn_state = data
+            if not stochastic:
+                action, rnn_state = actor(graph, rnn_state)
+            else:
+                action, rnn_state = actor(graph, rnn_state, key_)
+            next_graph, reward, cost, done, info = env.step(graph, action, get_eval_info=True)
+            return (next_graph, rnn_state), (graph, action, rnn_state, reward, cost, done, None, next_graph)
+
+        keys = jax.random.split(key, env.max_episode_steps)
+        _, (graphs, actions, actor_rnn_states, rewards, costs, dones, log_pis, next_graphs) = (
+            jax.lax.scan(body_,
+                         (init_graph, init_rnn_state),
+                         keys,
+                         length=env.max_episode_steps))
+        rollout_data = Rollout(graphs, actions, actor_rnn_states, rewards, costs, dones, log_pis, next_graphs)
     return rollout_data
 
 

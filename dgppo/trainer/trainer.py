@@ -142,13 +142,16 @@ class Trainer:
         # preprocess the rollout function
         init_rnn_state = self.algo.init_rnn_state
 
+        chunk_size = getattr(self.algo, 'chunk_size', 1)
+
         def test_fn_single(params, key):
             act_fn = ft.partial(self.algo.act, params=params)
             return test_rollout(
                 self.env_test,
                 act_fn,
                 init_rnn_state,
-                key
+                key,
+                chunk_size=chunk_size,
             )
 
 
