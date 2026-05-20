@@ -38,7 +38,7 @@ python train.py \
     -n 1 --obs 1 \
     --seed $SLURM_ARRAY_TASK_ID \
     --steps 200000 \
-    --rnn-step 32 \
+    --rnn-step 16 \
     --n-env-train $N_ENV_TRAIN \
     --batch-size  $BATCH_SIZE \
     --n-env-test  $N_ENV_TEST \
