@@ -56,11 +56,17 @@ class LidarEnvState(NamedTuple):
     obs_agent_buffer: jnp.ndarray = jnp.zeros((0, 0, 4))    # (buf_size, n_agents, 4)
     lidar_buffer: jnp.ndarray = jnp.zeros((0, 0, 0, 2))     # (buf_size, n_agents, 2*n_rays, 2)
 
-    # Reward delay buffer (lag variants) — shifts reward to match causing action
+    # Reward delay buffer (lag variants) — kept for backward compat but no longer used
     reward_buffer: jnp.ndarray = jnp.zeros(0)                       # (act_delay,); empty=no shift
 
     # Terrain randomization flag (DRT) — sampled once per episode at reset
     use_real_terrain: jnp.ndarray = jnp.ones((), dtype=jnp.int32)  # 1=real, 0=hardcoded
+
+    # Bug 3/4 fix: additional observation delay buffers for lag variants
+    lidar_terrain_id_buffer: jnp.ndarray = jnp.zeros((0, 0, 0), dtype=jnp.int32)  # (buf_size, n_agents, 2*n_rays)
+    bearing_buffer: jnp.ndarray = jnp.zeros((0, 0))                                # (buf_size, n_agents)
+    terrain_oh_buffer: jnp.ndarray = jnp.zeros((0, 0, 0))                          # (buf_size, n_agents, 3)
+    cluster_oh_buffer: jnp.ndarray = jnp.zeros((0, 0, 0))                          # (buf_size, n_agents, n_cluster)
 
     @property
     def n_agent(self) -> int:
@@ -983,7 +989,7 @@ class LidarEnv(MultiAgentEnv, ABC):
         # jd.print("[TERRAIN STEP DEBUG] terrain_ids (0=Road,1=Grass,2=Sidewalk): {}", next_terrain_ids)
         # jd.print("[TERRAIN STEP DEBUG] terrain_oh: {}", next_terrain_oh)
 
-        reward, bonus_awarded_updated = self.get_reward(graph, action)
+        reward, bonus_awarded_updated = self.get_reward(graph, executed_action)
         cost = self.get_cost(graph)
         assert reward.shape == tuple()
 
@@ -1025,13 +1031,15 @@ class LidarEnv(MultiAgentEnv, ABC):
             bridge_bend_angle=bridge_bend_angle,
             use_real_terrain=env_state_updated.use_real_terrain,
         )
-        lidar_hit_terrain_ids_next = merge01(lidar_terrain_ids_next)  # (n_agents * 2*n_rays,)
-        lidar_hit_positions_next   = merge01(lidar_data_next)         # (n_agents * 2*n_rays, 2)
+        lidar_hit_positions_next = merge01(lidar_data_next)
 
         step_key, k_noise = jr.split(env_state_updated.key)
         obs_agent, noisy_lidar = self._obs_noise(next_agent_base_states, lidar_data_next, k_noise)
-        obs_agent, noisy_lidar, env_state_updated = self._apply_obs_delay(
-            obs_agent, noisy_lidar, env_state_updated
+        (obs_agent, noisy_lidar, lidar_terrain_ids_next,
+         bearing, next_terrain_oh, current_cluster_oh,
+         env_state_updated) = self._apply_obs_delay(
+            obs_agent, noisy_lidar, lidar_terrain_ids_next,
+            bearing, next_terrain_oh, current_cluster_oh, env_state_updated
         )
 
         next_env_state = LidarEnvState(
@@ -1044,7 +1052,7 @@ class LidarEnv(MultiAgentEnv, ABC):
             chained_next_cluster_oh,
             bonus_awarded_updated,
             next_terrain_oh,
-            lidar_hit_terrain_ids_next,
+            merge01(lidar_terrain_ids_next),
             lidar_hit_positions_next,
             bridge_center,
             bridge_length,
@@ -1060,6 +1068,10 @@ class LidarEnv(MultiAgentEnv, ABC):
             lidar_buffer=env_state_updated.lidar_buffer,
             reward_buffer=env_state_updated.reward_buffer,
             use_real_terrain=env_state_updated.use_real_terrain,
+            lidar_terrain_id_buffer=env_state_updated.lidar_terrain_id_buffer,
+            bearing_buffer=env_state_updated.bearing_buffer,
+            terrain_oh_buffer=env_state_updated.terrain_oh_buffer,
+            cluster_oh_buffer=env_state_updated.cluster_oh_buffer,
         )
 
         info = {}
@@ -1251,10 +1263,14 @@ class LidarEnv(MultiAgentEnv, ABC):
         self,
         obs_agent: jnp.ndarray,
         noisy_lidar: Optional[jnp.ndarray],
+        terrain_ids: Optional[jnp.ndarray],
+        bearing: jnp.ndarray,
+        terrain_oh: jnp.ndarray,
+        cluster_oh: jnp.ndarray,
         env_state: "LidarEnvState",
-    ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], "LidarEnvState"]:
-        """Returns (delayed_obs_agent, delayed_lidar, updated_env_state). Base: no delay."""
-        return obs_agent, noisy_lidar, env_state
+    ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], Optional[jnp.ndarray], jnp.ndarray, jnp.ndarray, jnp.ndarray, "LidarEnvState"]:
+        """Returns (obs_agent, lidar, terrain_ids, bearing, terrain_oh, cluster_oh, env_state). Base: no delay."""
+        return obs_agent, noisy_lidar, terrain_ids, bearing, terrain_oh, cluster_oh, env_state
 
     def _obs_noise(
         self,

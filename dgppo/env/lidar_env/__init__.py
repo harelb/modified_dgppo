@@ -4,6 +4,7 @@ from .lidar_target import (
     LidarTargetBFLag2, LidarTargetBFLag2NoAug,
     LidarTargetBFLag8, LidarTargetBRLag8, LidarTargetDRTLag8,
     LidarTargetBFLag15, LidarTargetBRLag15, LidarTargetDRTLag15,
+    LidarTargetDRTLag12,
 )
 from .lidar_spread import LidarSpread
 from .lidar_line import LidarLine

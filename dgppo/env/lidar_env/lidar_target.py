@@ -620,9 +620,9 @@ class LidarTargetV1(LidarTarget):
     def reset(self, key, **kwargs):
         graph = super().reset(key, **kwargs)
         env_state = graph.env_states
-        # Initialize obs_agent with (n_agents, 4) so lax.scan carry shape is consistent with step()
+        # Use actual agent state so policy sees correct obs at t=0 (zeros caused PPO collapse)
         new_env_state = env_state._replace(
-            obs_agent=jnp.zeros((self.num_agents, 4), dtype=jnp.float32)
+            obs_agent=env_state.agent.astype(jnp.float32)
         )
         return graph._replace(env_states=new_env_state)
 
@@ -838,48 +838,65 @@ class _FixedLagMixin:
             es.lidar_hit_positions[:2 * n_rays * self.num_agents],
             (self.num_agents, 2 * n_rays, 2),
         )
+        init_terrain_ids = jnp.reshape(
+            es.lidar_hit_terrain_ids[:2 * n_rays * self.num_agents],
+            (self.num_agents, 2 * n_rays),
+        )
 
         obs_buf = jnp.tile(init_obs[None], (self.OBS_DELAY_STEPS, 1, 1))
         lid_buf = jnp.tile(init_lidar[None], (self.OBS_DELAY_STEPS, 1, 1, 1))
-        k_act, k_rest = jr.split(es.key)
-        act_buf = jr.uniform(
-            k_act, (self.ACT_DELAY_STEPS, self.num_agents, self.action_dim),
-            minval=-0.3, maxval=0.3,
-        )
-        es = es._replace(key=k_rest)
-
-        reward_buf = jnp.zeros(self.ACT_DELAY_STEPS, dtype=jnp.float32)
+        act_buf = jnp.zeros((self.ACT_DELAY_STEPS, self.num_agents, self.action_dim))
+        tid_buf = jnp.tile(init_terrain_ids[None], (self.OBS_DELAY_STEPS, 1, 1))
+        bea_buf = jnp.tile(es.bearing[None], (self.OBS_DELAY_STEPS, 1))
+        toh_buf = jnp.tile(es.current_terrain_oh[None], (self.OBS_DELAY_STEPS, 1, 1))
+        coh_buf = jnp.tile(es.current_cluster_oh[None], (self.OBS_DELAY_STEPS, 1, 1))
 
         es = es._replace(
             obs_agent_buffer=obs_buf,
             lidar_buffer=lid_buf,
             action_buffer=act_buf,
-            reward_buffer=reward_buf,
+            lidar_terrain_id_buffer=tid_buf,
+            bearing_buffer=bea_buf,
+            terrain_oh_buffer=toh_buf,
+            cluster_oh_buffer=coh_buf,
         )
         graph = self.get_graph(es, init_lidar)
         return self._fill_action_buf_features(graph, act_buf)
 
     def step(self, graph, action, **kwargs):
         next_graph, reward, cost, done, info = super().step(graph, action, **kwargs)
-        es = next_graph.env_states
-        buf = es.reward_buffer
-        delayed_reward = buf[0]
-        new_buf = jnp.concatenate([buf[1:], reward[None]])
-        new_es = es._replace(reward_buffer=new_buf)
-        next_graph = next_graph._replace(env_states=new_es)
-        next_graph = self._fill_action_buf_features(next_graph, new_es.action_buffer)
-        return next_graph, delayed_reward, cost, done, info
+        next_graph = self._fill_action_buf_features(next_graph, next_graph.env_states.action_buffer)
+        return next_graph, reward, cost, done, info
 
-    def _apply_obs_delay(self, obs_agent, noisy_lidar, env_state):
+    def _apply_obs_delay(self, obs_agent, noisy_lidar, terrain_ids, bearing, terrain_oh, cluster_oh, env_state):
         buf_obs = env_state.obs_agent_buffer
         buf_lid = env_state.lidar_buffer
+        buf_tid = env_state.lidar_terrain_id_buffer
+        buf_bea = env_state.bearing_buffer
+        buf_toh = env_state.terrain_oh_buffer
+        buf_coh = env_state.cluster_oh_buffer
+
         delayed_obs = buf_obs[0]
         delayed_lid = buf_lid[0]
+        delayed_tid = buf_tid[0]
+        delayed_bea = buf_bea[0]
+        delayed_toh = buf_toh[0]
+        delayed_coh = buf_coh[0]
+
         new_buf_obs = jnp.concatenate([buf_obs[1:], obs_agent[None]], axis=0)
         new_buf_lid = jnp.concatenate([buf_lid[1:], noisy_lidar[None]], axis=0)
-        return delayed_obs, delayed_lid, env_state._replace(
+        new_buf_tid = jnp.concatenate([buf_tid[1:], terrain_ids[None]], axis=0)
+        new_buf_bea = jnp.concatenate([buf_bea[1:], bearing[None]], axis=0)
+        new_buf_toh = jnp.concatenate([buf_toh[1:], terrain_oh[None]], axis=0)
+        new_buf_coh = jnp.concatenate([buf_coh[1:], cluster_oh[None]], axis=0)
+
+        return delayed_obs, delayed_lid, delayed_tid, delayed_bea, delayed_toh, delayed_coh, env_state._replace(
             obs_agent_buffer=new_buf_obs,
             lidar_buffer=new_buf_lid,
+            lidar_terrain_id_buffer=new_buf_tid,
+            bearing_buffer=new_buf_bea,
+            terrain_oh_buffer=new_buf_toh,
+            cluster_oh_buffer=new_buf_coh,
         )
 
     def _get_executed_action(self, action, env_state):
@@ -954,3 +971,9 @@ class LidarTargetDRTLag15(_FixedLagMixin, LidarTargetDRT):
     """DRT-Lag15: Domain Randomized Terrain + 500ms lag (2+13 steps)."""
     OBS_DELAY_STEPS = 2
     ACT_DELAY_STEPS = 13
+
+
+class LidarTargetDRTLag12(_FixedLagMixin, LidarTargetDRT):
+    """DRT-Lag12: Domain Randomized Terrain + 400ms lag (2+10 steps), rnn_step=32."""
+    OBS_DELAY_STEPS = 2
+    ACT_DELAY_STEPS = 10
