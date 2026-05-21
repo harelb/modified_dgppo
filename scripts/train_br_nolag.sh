@@ -32,6 +32,7 @@ fi
 echo "Settings: n-env-train=$N_ENV_TRAIN  batch-size=$BATCH_SIZE  n-env-test=$N_ENV_TEST"
 
 python train.py \
+    --name br_nolag \
     --env LidarTargetV3 \
     --algo dgppo \
     -n 1 --obs 1 \
@@ -41,4 +42,5 @@ python train.py \
     --n-env-train $N_ENV_TRAIN \
     --batch-size  $BATCH_SIZE \
     --n-env-test  $N_ENV_TEST \
-    --log-dir /home/harelb/orcd/scratch/dgppo/logs
+    --log-dir /home/harelb/orcd/scratch/dgppo/logs \
+    --resume-last

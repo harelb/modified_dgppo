@@ -2,7 +2,7 @@
 #SBATCH -p mit_preemptable
 #SBATCH --array=0
 #SBATCH -c 8
-#SBATCH --gpus=1
+#SBATCH --gpus=h100:1
 #SBATCH -t 2880
 #SBATCH --mem=64GB
 #SBATCH -o /home/harelb/orcd/scratch/dgppo/logs/bf_nolag_%A_%a.out
@@ -32,6 +32,7 @@ fi
 echo "Settings: n-env-train=$N_ENV_TRAIN  batch-size=$BATCH_SIZE  n-env-test=$N_ENV_TEST"
 
 python train.py \
+    --name bf_nolag \
     --env LidarTargetV1 \
     --algo dgppo \
     -n 1 --obs 1 \
@@ -41,4 +42,5 @@ python train.py \
     --n-env-train $N_ENV_TRAIN \
     --batch-size  $BATCH_SIZE \
     --n-env-test  $N_ENV_TEST \
-    --log-dir /home/harelb/orcd/scratch/dgppo/logs
+    --log-dir /home/harelb/orcd/scratch/dgppo/logs \
+    --resume-last

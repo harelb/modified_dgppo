@@ -33,6 +33,7 @@ fi
 echo "Settings: n-env-train=$N_ENV_TRAIN  batch-size=$BATCH_SIZE  n-env-test=$N_ENV_TEST"
 
 python train.py \
+    --name drt_nolag \
     --env LidarTargetDRT \
     --algo dgppo \
     -n 1 --obs 1 \
