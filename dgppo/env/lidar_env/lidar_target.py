@@ -236,7 +236,7 @@ class LidarTarget(LidarEnv):
         "bridge_length_range": [0.5, 1.0],
         "bridge_gap_width_range": [0.2, 0.4],
         "bridge_wall_thickness_range": [0.05, 0.1],
-        "bridge_bend_angle_range": [-0.4, 0.4]   # ≈ ±23° bend — POC angular bridge
+        "bridge_bend_angle_range": [0.0, 0.0]     # straight bridge only
     }
 
     def __init__(

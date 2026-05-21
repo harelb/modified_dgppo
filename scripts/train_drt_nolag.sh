@@ -44,4 +44,6 @@ python train.py \
     --n-env-train $N_ENV_TRAIN \
     --batch-size  $BATCH_SIZE \
     --log-dir /home/harelb/orcd/scratch/dgppo/logs \
-    --resume-last
+    --steps 400000 \
+    --resume-last \
+    --load-best
