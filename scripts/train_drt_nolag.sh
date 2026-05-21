@@ -2,10 +2,11 @@
 #SBATCH -p mit_preemptable
 #SBATCH --array=0
 #SBATCH -c 8
-#SBATCH --gpus=1
+#SBATCH --gpus=h100:1
 #SBATCH -t 2880
 #SBATCH --mem=64GB
 #SBATCH -o /home/harelb/orcd/scratch/dgppo/logs/drt_nolag_%A_%a.out
+#SBATCH --exclude=node4400
 #
 # GPU-adaptive: batch size scales with detected VRAM.
 
@@ -41,4 +42,5 @@ python train.py \
     --n-env-test  $N_ENV_TEST \
     --n-env-train $N_ENV_TRAIN \
     --batch-size  $BATCH_SIZE \
-    --log-dir /home/harelb/orcd/scratch/dgppo/logs
+    --log-dir /home/harelb/orcd/scratch/dgppo/logs \
+    --resume-last
