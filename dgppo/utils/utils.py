@@ -112,7 +112,8 @@ def jax_jit_np(
         *args,
         **kwargs,
 ) -> _Fn:
-    jit_fn = jax.jit(fn, static_argnums, static_argnames, donate_argnums, device, *args, **kwargs)
+    jit_fn = jax.jit(fn, static_argnums=static_argnums, static_argnames=static_argnames,
+                     donate_argnums=donate_argnums, device=device, **kwargs)
 
     def wrapper(*args, **kwargs) -> _R:
         return jax2np(jit_fn(*args, **kwargs))
