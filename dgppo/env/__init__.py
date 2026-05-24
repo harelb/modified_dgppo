@@ -9,6 +9,8 @@ from dgppo.env.lidar_env import (
     LidarTargetBFLag8, LidarTargetBRLag8, LidarTargetDRTLag8,
     LidarTargetBFLag15, LidarTargetBRLag15, LidarTargetDRTLag15,
     LidarTargetDRTLag12,
+    LidarTargetDRTLagRand16, LidarTargetDRTLagRand38,
+    LidarTargetV1LagRand16, LidarTargetV1LagRand38,
 )  #, LidarBicycleTarget
 from dgppo.env.vmas import VMASWheel, VMASReverseTransport
 
@@ -41,6 +43,10 @@ ENV = {
     'LidarTargetBRLag15': LidarTargetBRLag15,
     'LidarTargetDRTLag15': LidarTargetDRTLag15,
     'LidarTargetDRTLag12': LidarTargetDRTLag12,
+    'LidarTargetDRTLagRand16': LidarTargetDRTLagRand16,
+    'LidarTargetDRTLagRand38': LidarTargetDRTLagRand38,
+    'LidarTargetV1LagRand16': LidarTargetV1LagRand16,
+    'LidarTargetV1LagRand38': LidarTargetV1LagRand38,
 }
 
 

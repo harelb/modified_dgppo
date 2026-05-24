@@ -14,7 +14,7 @@ GPU_PRIORITY=(h200 h100 l40s a100)      # order of preference; best first
 WAIT_MIN=3                               # minutes to wait before trying next GPU
 LOG_DIR="${HOME}/orcd/scratch/dgppo/logs"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VARIANTS=(bf_nolag br_nolag drt_nolag drt_lag12)
+VARIANTS=(drt_lagrand16 drt_lagrand38 v1_lagrand16 v1_lagrand38)
 # ─────────────────────────────────────────────────────────────────────────────
 
 mkdir -p "$LOG_DIR"

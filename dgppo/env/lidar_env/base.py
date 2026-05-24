@@ -68,6 +68,10 @@ class LidarEnvState(NamedTuple):
     terrain_oh_buffer: jnp.ndarray = jnp.zeros((0, 0, 0))                          # (buf_size, n_agents, 3)
     cluster_oh_buffer: jnp.ndarray = jnp.zeros((0, 0, 0))                          # (buf_size, n_agents, n_cluster)
 
+    # Random-lag variant fields: current episode's obs/act lag depths (scalar int32, 0 = no lag)
+    obs_lag_steps: jnp.ndarray = jnp.array(0, dtype=jnp.int32)
+    act_lag_steps: jnp.ndarray = jnp.array(0, dtype=jnp.int32)
+
     @property
     def n_agent(self) -> int:
         return self.agent.shape[0]
@@ -1045,6 +1049,8 @@ class LidarEnv(MultiAgentEnv, ABC):
             bearing_buffer=env_state_updated.bearing_buffer,
             terrain_oh_buffer=env_state_updated.terrain_oh_buffer,
             cluster_oh_buffer=env_state_updated.cluster_oh_buffer,
+            obs_lag_steps=env_state_updated.obs_lag_steps,
+            act_lag_steps=env_state_updated.act_lag_steps,
         )
 
         info = {}

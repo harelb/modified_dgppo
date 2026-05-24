@@ -977,3 +977,158 @@ class LidarTargetDRTLag12(_FixedLagMixin, LidarTargetDRT):
     """DRT-Lag12: Domain Randomized Terrain + 400ms lag (2+10 steps), rnn_step=32."""
     OBS_DELAY_STEPS = 2
     ACT_DELAY_STEPS = 10
+
+
+# ---------------------------------------------------------------------------
+# Random Lag Mixin: randomizes action lag per episode
+# ---------------------------------------------------------------------------
+
+class _RandomLagMixin(_FixedLagMixin):
+    """Mixin that randomizes the action lag depth each episode.
+
+    Subclasses must set:
+        OBS_DELAY_STEPS  -- fixed obs lag (kept constant; buffers pre-allocated for this depth)
+        MIN_ACT_DELAY    -- minimum action lag (inclusive)
+        MAX_ACT_DELAY    -- maximum action lag (inclusive); buffers pre-allocated for this depth
+
+    At reset, act_lag is sampled uniformly from [MIN_ACT_DELAY, MAX_ACT_DELAY] and stored in
+    env_state.act_lag_steps.  The action buffer is always pre-allocated for MAX_ACT_DELAY steps
+    (JAX requires fixed array shapes).  _get_executed_action reads `buf[MAX_ACT_DELAY - act_lag]`
+    instead of `buf[0]`, effectively varying the FIFO depth without resizing the buffer.
+
+    Similarly, obs_lag_steps is stored in env_state and _apply_obs_delay uses it to index into
+    the obs buffer.  For these variants OBS_DELAY_STEPS is fixed (=1), so obs_lag never varies,
+    but the field is written for consistency and future extensibility.
+    """
+
+    MIN_ACT_DELAY: int
+    MAX_ACT_DELAY: int
+
+    @property
+    def agent_extra_dim(self) -> int:
+        # Augmented state always exposes MAX_ACT_DELAY slots so the network sees a
+        # fixed-size action history regardless of the sampled lag depth.
+        return self.MAX_ACT_DELAY * self.action_dim
+
+    def _fill_action_buf_features(self, graph, action_buffer):
+        """Inject flattened action buffer (MAX_ACT_DELAY slots) into agent node features."""
+        expected_size = self.MAX_ACT_DELAY * self.action_dim
+        buf_flat = action_buffer.reshape(-1)
+        IND = self.state_dim + self.bearing_dim + 3 * self.n_cluster + self.terrain_oh_dim
+        extra_start = IND + 4
+        new_nodes = graph.nodes.at[:self.num_agents, extra_start:extra_start + expected_size].set(
+            jnp.tile(buf_flat[None], (self.num_agents, 1))
+        )
+        return graph._replace(nodes=new_nodes)
+
+    def reset(self, key, **kwargs):
+        # Use _FixedLagMixin.reset with OBS_DELAY_STEPS and ACT_DELAY_STEPS = MAX_ACT_DELAY.
+        # Temporarily masquerade ACT_DELAY_STEPS as MAX_ACT_DELAY so parent allocates correctly.
+        graph = super().reset(key, **kwargs)
+        es = graph.env_states
+
+        # Sample act_lag uniformly from [MIN_ACT_DELAY, MAX_ACT_DELAY] (inclusive).
+        lag_key, _ = jr.split(es.key)
+        act_lag = jr.randint(lag_key, shape=(), minval=self.MIN_ACT_DELAY, maxval=self.MAX_ACT_DELAY + 1)
+        obs_lag = jnp.array(self.OBS_DELAY_STEPS, dtype=jnp.int32)
+
+        es = es._replace(
+            act_lag_steps=act_lag.astype(jnp.int32),
+            obs_lag_steps=obs_lag,
+        )
+        # Rebuild graph with updated env_state (node features unchanged by lag scalars).
+        n_rays = self._params["n_rays"]
+        init_lidar = jnp.reshape(
+            es.lidar_hit_positions[:2 * n_rays * self.num_agents],
+            (self.num_agents, 2 * n_rays, 2),
+        )
+        graph = self.get_graph(es, init_lidar)
+        return self._fill_action_buf_features(graph, es.action_buffer)
+
+    def _apply_obs_delay(self, obs_agent, noisy_lidar, terrain_ids, bearing, terrain_oh, cluster_oh, env_state):
+        """Read delayed obs from buffer using the episode's obs_lag_steps depth."""
+        buf_obs = env_state.obs_agent_buffer
+        buf_lid = env_state.lidar_buffer
+        buf_tid = env_state.lidar_terrain_id_buffer
+        buf_bea = env_state.bearing_buffer
+        buf_toh = env_state.terrain_oh_buffer
+        buf_coh = env_state.cluster_oh_buffer
+
+        obs_lag = env_state.obs_lag_steps  # scalar int32, 1..OBS_DELAY_STEPS
+        # Buffer layout after _FixedLagMixin.reset: index 0 = oldest (OBS_DELAY_STEPS steps ago),
+        # index -1 = most recent enqueued.  To retrieve obs that is `obs_lag` steps old we read
+        # buf[OBS_DELAY_STEPS - obs_lag].  For the fixed case obs_lag == OBS_DELAY_STEPS so this
+        # simplifies to buf[0], matching the parent implementation.
+        read_idx = self.OBS_DELAY_STEPS - obs_lag
+
+        delayed_obs = buf_obs[read_idx]
+        delayed_lid = buf_lid[read_idx]
+        delayed_tid = buf_tid[read_idx]
+        delayed_bea = buf_bea[read_idx]
+        delayed_toh = buf_toh[read_idx]
+        delayed_coh = buf_coh[read_idx]
+
+        new_buf_obs = jnp.concatenate([buf_obs[1:], obs_agent[None]], axis=0)
+        new_buf_lid = jnp.concatenate([buf_lid[1:], noisy_lidar[None]], axis=0)
+        new_buf_tid = jnp.concatenate([buf_tid[1:], terrain_ids[None]], axis=0)
+        new_buf_bea = jnp.concatenate([buf_bea[1:], bearing[None]], axis=0)
+        new_buf_toh = jnp.concatenate([buf_toh[1:], terrain_oh[None]], axis=0)
+        new_buf_coh = jnp.concatenate([buf_coh[1:], cluster_oh[None]], axis=0)
+
+        return delayed_obs, delayed_lid, delayed_tid, delayed_bea, delayed_toh, delayed_coh, env_state._replace(
+            obs_agent_buffer=new_buf_obs,
+            lidar_buffer=new_buf_lid,
+            lidar_terrain_id_buffer=new_buf_tid,
+            bearing_buffer=new_buf_bea,
+            terrain_oh_buffer=new_buf_toh,
+            cluster_oh_buffer=new_buf_coh,
+        )
+
+    def _get_executed_action(self, action, env_state):
+        """Read delayed action from buffer using the episode's act_lag_steps depth."""
+        buf = env_state.action_buffer
+        act_lag = env_state.act_lag_steps  # scalar int32, MIN_ACT_DELAY..MAX_ACT_DELAY
+        # Buffer has MAX_ACT_DELAY slots.  Index 0 = oldest (MAX_ACT_DELAY steps ago),
+        # index -1 = newest.  Reading buf[MAX_ACT_DELAY - act_lag] gives us the action
+        # that was queued `act_lag` steps ago.
+        read_idx = self.MAX_ACT_DELAY - act_lag
+        delayed_action = buf[read_idx]
+        new_buf = jnp.concatenate([buf[1:], action[None]], axis=0)
+        return delayed_action, env_state._replace(action_buffer=new_buf)
+
+
+# ---------------------------------------------------------------------------
+# Randomized-lag DRT variants (rnn_step=16)
+# ---------------------------------------------------------------------------
+
+class LidarTargetDRTLagRand16(_RandomLagMixin, LidarTargetDRT):
+    """DRT with action lag randomized each episode to 1–6 steps, obs lag fixed at 1, rnn_step=16."""
+    OBS_DELAY_STEPS = 1
+    MIN_ACT_DELAY = 1
+    MAX_ACT_DELAY = 6
+    # _FixedLagMixin.reset uses ACT_DELAY_STEPS to size the buffer; override to MAX.
+    ACT_DELAY_STEPS = MAX_ACT_DELAY
+
+
+class LidarTargetDRTLagRand38(_RandomLagMixin, LidarTargetDRT):
+    """DRT with action lag randomized each episode to 3–8 steps, obs lag fixed at 1, rnn_step=16."""
+    OBS_DELAY_STEPS = 1
+    MIN_ACT_DELAY = 3
+    MAX_ACT_DELAY = 8
+    ACT_DELAY_STEPS = MAX_ACT_DELAY
+
+
+class LidarTargetV1LagRand16(_RandomLagMixin, LidarTargetV1):
+    """V1 (fake boundaries) with action lag randomized each episode to 1–6 steps, rnn_step=16."""
+    OBS_DELAY_STEPS = 1
+    MIN_ACT_DELAY = 1
+    MAX_ACT_DELAY = 6
+    ACT_DELAY_STEPS = MAX_ACT_DELAY
+
+
+class LidarTargetV1LagRand38(_RandomLagMixin, LidarTargetV1):
+    """V1 (fake boundaries) with action lag randomized each episode to 3–8 steps, rnn_step=16."""
+    OBS_DELAY_STEPS = 1
+    MIN_ACT_DELAY = 3
+    MAX_ACT_DELAY = 8
+    ACT_DELAY_STEPS = MAX_ACT_DELAY
